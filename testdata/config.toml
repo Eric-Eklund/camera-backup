@@ -1,0 +1,6 @@
+source = "testdata/camera"
+ssd    = "testdata/ssd"
+nas    = "testdata/nas"
+
+file_extensions  = [".MOV", ".NEF", ".JPG", ".MP4"]
+video_extensions = [".MOV", ".MP4"]

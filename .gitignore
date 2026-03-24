@@ -1,0 +1,9 @@
+# Binaries
+camera-backup
+camera-backup.exe
+
+# Logs
+logs/
+
+# Go
+vendor/

@@ -1,0 +1,4 @@
+# Ignore copies made during testing
+ssd/
+nas/
+camera/

@@ -1,0 +1,10 @@
+source = "E:\\"               # Camera / memory card (mounted drive)
+ssd    = "D:\\CameraBackup"   # Local SSD destination
+nas    = "Y:\\CameraBackup"   # NAS mapped via SMB (or WireGuard VPN)
+
+file_extensions = [
+  ".MOV",
+  ".NEF",
+  ".JPG",
+  ".MP4",
+]
