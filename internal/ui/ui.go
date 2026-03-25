@@ -85,25 +85,53 @@ func PrintFileTable(rows []FileStatusRow) {
 	fmt.Println()
 }
 
-func PrintSummary(totalCamera, missingFromSSD, missingFromNAS int, nasAvail bool) {
+// SpaceInfo holds how much needs to be copied and how much is free on a destination.
+type SpaceInfo struct {
+	Avail     bool
+	ToBytes   int64
+	FreeBytes int64 // -1 if free space could not be determined
+}
+
+func PrintSummary(totalCamera int, cameraBytes int64, missingFromSSD, missingFromNAS int, ssd, nas SpaceInfo, nasAvail bool) {
 	Bold.Println("  Summary")
-	fmt.Println("  " + strings.Repeat("─", 40))
-	fmt.Printf("  Camera files found :  %d\n", totalCamera)
-	if missingFromSSD > 0 {
-		Yellow.Printf("  Missing from SSD  :  %d\n", missingFromSSD)
-	} else {
-		Green.Printf("  Missing from SSD  :  0\n")
-	}
+	fmt.Println("  " + strings.Repeat("─", 52))
+	fmt.Printf("  Camera files found :  %d  (%s)\n", totalCamera, FormatBytes(cameraBytes))
+
+	printDestLine("SSD", missingFromSSD, ssd)
+
 	if nasAvail {
-		if missingFromNAS > 0 {
-			Yellow.Printf("  Missing from NAS  :  %d\n", missingFromNAS)
-		} else {
-			Green.Printf("  Missing from NAS  :  0\n")
-		}
+		printDestLine("NAS", missingFromNAS, nas)
 	} else {
 		Dim.Println("  NAS               :  not available")
 	}
 	fmt.Println()
+}
+
+func printDestLine(label string, missing int, space SpaceInfo) {
+	if !space.Avail {
+		Red.Printf("  %-18s :  not available\n", label)
+		return
+	}
+
+	if missing == 0 {
+		Green.Printf("  Missing from %-4s :  0\n", label)
+		return
+	}
+
+	sizeStr := FormatBytes(space.ToBytes)
+
+	if space.FreeBytes < 0 {
+		Yellow.Printf("  Missing from %-4s :  %d  (%s to copy)\n", label, missing, sizeStr)
+		return
+	}
+
+	if space.ToBytes > space.FreeBytes {
+		Red.Printf("  Missing from %-4s :  %d  (%s to copy — only %s free ⚠️)\n",
+			label, missing, sizeStr, FormatBytes(space.FreeBytes))
+	} else {
+		Yellow.Printf("  Missing from %-4s :  %d  (%s to copy, %s free)\n",
+			label, missing, sizeStr, FormatBytes(space.FreeBytes))
+	}
 }
 
 // PrintSeparator prints a full-width rule with a blank line on each side.

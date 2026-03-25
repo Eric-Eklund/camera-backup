@@ -2,14 +2,14 @@
 
 A CLI tool for safely backing up camera media (Nikon Z6 III and similar) from memory cards to a local SSD and a remote NAS — incrementally and with SHA256 verification.
 
-Built in Go. Never deletes source files.
+Built in Go. Never deletes or overwrites source files.
 
 ---
 
 ## Workflow
 
 1. Connect camera via USB-C (mounts as a drive, e.g. `E:\`)
-2. `camera-backup status` — see what needs copying
+2. `camera-backup status` — see what needs copying and verify there is enough space
 3. `camera-backup copy`
    - Copies new files camera → SSD, SHA256 verifies each file
    - **Pauses** — disconnect and power off camera here
@@ -23,8 +23,10 @@ Built in Go. Never deletes source files.
 
 - Source files are **never deleted** by this tool
 - Source files are opened **read-only**
+- Destination files are **never overwritten** — if a filename already exists, the new file is saved with a `_1`, `_2`, … suffix and a warning is printed
 - Memory cards are always formatted manually in-camera
 - Copy order is always `Camera → SSD → NAS` (never camera → NAS directly)
+- `copy` checks available disk space before starting and aborts if there is not enough room
 
 ---
 
@@ -32,7 +34,7 @@ Built in Go. Never deletes source files.
 
 ### `camera-backup status`
 
-Quick check — compares by filename and file size. Runs in seconds regardless of how many files are on the card.
+Quick check — compares by filename and file size. Shows how much data needs to be copied and whether there is enough free space on each destination.
 
 ```
   Devices
@@ -42,11 +44,13 @@ Quick check — compares by filename and file size. Runs in seconds regardless o
   ✅  NAS     Y:\CameraBackup           1.2 TB free
 
   Summary
-  ────────────────────────────────────────
-  Camera files found :  47
-  Missing from SSD  :  13
-  Missing from NAS  :  13
+  ────────────────────────────────────────────────────────
+  Camera files found :  47  (2.1 GB)
+  Missing from SSD   :  13  (620.4 MB to copy, 210.4 GB free)
+  Missing from NAS   :  13  (620.4 MB to copy, 1.2 TB free)
 ```
+
+If a destination is not connected it shows as `not available` in red.
 
 ### `camera-backup copy`
 
@@ -61,10 +65,6 @@ Incremental copy with SHA256 verification after each file.
   [1/13] photos/2026-03-24/DSC_0142.NEF
   DSC_0142.NEF               45.2 MB   89.3 MB/s  [████████████████████]  100.0%
     Verifying DSC_0142.NEF              ✅
-
-  [2/13] photos/2026-03-24/DSC_0142.JPG
-  DSC_0142.JPG                8.1 MB   91.0 MB/s  [████████████████████]  100.0%
-    Verifying DSC_0142.JPG              ✅
   ...
 
   ✅  13 file(s) copied and verified.
@@ -82,8 +82,6 @@ Incremental copy with SHA256 verification after each file.
   ─────────────────────────────────────────
 
   Copy 13 file(s) to NAS? [y/N]: y
-
-  [1/13] photos/2026-03-24/DSC_0142.NEF
   ...
 
   ✅  13 file(s) copied and verified.
@@ -106,18 +104,7 @@ By default only failures are printed:
   2 / 47 files have issues.
 ```
 
-Pass `--verbose` / `-v` to see every file:
-
-```
-camera-backup verify --verbose
-```
-
-```
-  ✅  DSC_0142.NEF
-  ✅  DSC_0142.JPG
-  ⚠️   DSC_0098.NEF — [missing from NAS]
-  ...
-```
+Pass `--verbose` / `-v` to see every file.
 
 ---
 
@@ -156,7 +143,7 @@ D:\CameraBackup\
       VIDEO002.MP4
 ```
 
-Both SSD and NAS use the same structure. This prevents filename collisions across sessions (Nikon resets to `DSC_0001` when a new card is formatted).
+Both SSD and NAS use the same structure. The date folder prevents filename collisions across sessions (Nikon resets to `DSC_0001` when a new card is formatted).
 
 ---
 
@@ -170,7 +157,31 @@ logs/
   2026-03-24_22-13-10.log
 ```
 
-Logs include: files copied, SHA256 checksums, errors and run summary.
+Logs include: files copied, SHA256 checksums, errors and run summary. If a filename collision is resolved by renaming, a `COLLISION` entry is written with both the original and the saved path.
+
+---
+
+## Local testing
+
+Synthetic testdata covering all copy scenarios can be generated with:
+
+```bash
+go run testdata/make_testdata.go
+```
+
+Then run against it:
+
+```bash
+go run ./cmd/camera-backup --config testdata/config.toml status
+go run ./cmd/camera-backup --config testdata/config.toml copy
+go run ./cmd/camera-backup --config testdata/config.toml verify -v
+```
+
+Reset:
+
+```bash
+rm -rf testdata/camera testdata/ssd testdata/nas && go run testdata/make_testdata.go
+```
 
 ---
 
@@ -181,7 +192,7 @@ Requires Go 1.22+.
 ```bash
 git clone https://github.com/Eric-Eklund/camera-backup
 cd camera-backup
-go build -o camera-backup.exe ./cmd/camera-backup
+GOOS=windows GOARCH=amd64 go build -o camera-backup.exe ./cmd/camera-backup
 ```
 
 Copy `camera-backup.exe` and `config.toml` to a folder on your laptop. Run from PowerShell or Windows Terminal.
@@ -193,7 +204,7 @@ Copy `camera-backup.exe` and `config.toml` to a folder on your laptop. Run from 
 ```
 camera-backup/
 ├── cmd/camera-backup/
-│   └── main.go              # Entry point, subcommands
+│   └── main.go              # Entry point, subcommands, space check
 ├── internal/
 │   ├── config/              # TOML loading, extension matching
 │   ├── scan/                # File scanning and comparison
@@ -204,6 +215,7 @@ camera-backup/
 │   └── ui/                  # Terminal colours, progress bar, prompts
 ├── testdata/
 │   ├── config.toml          # Config pointing at testdata directories
+│   ├── make_testdata.go     # Generator for synthetic test files
 │   └── .gitignore
 ├── config.toml              # User configuration (edit this)
 ├── go.mod

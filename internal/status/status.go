@@ -49,14 +49,27 @@ func Run(cfg *config.Config, logger *log.Logger) error {
 
 	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
 
-	missingFromSSD := len(scan.MissingFromDest(cameraFiles, ssdIndex, categoryFn))
-	missingFromNAS := len(scan.MissingFromDest(cameraFiles, nasIndex, categoryFn))
+	missingSSD := scan.MissingFromDest(cameraFiles, ssdIndex, categoryFn)
+	missingNAS := scan.MissingFromDest(cameraFiles, nasIndex, categoryFn)
 
-	ui.PrintSummary(len(cameraFiles), missingFromSSD, missingFromNAS, nasAvail)
+	ssdInfo := ui.SpaceInfo{Avail: ssdAvail, ToBytes: totalSize(missingSSD), FreeBytes: freeOrNeg(cfg.SSD, ssdAvail)}
+	nasInfo := ui.SpaceInfo{Avail: nasAvail, ToBytes: totalSize(missingNAS), FreeBytes: freeOrNeg(cfg.NAS, nasAvail)}
 
-	logger.Printf("status: %d camera files, %d missing from SSD, %d missing from NAS",
-		len(cameraFiles), missingFromSSD, missingFromNAS)
+	ui.PrintSummary(len(cameraFiles), totalSize(cameraFiles), len(missingSSD), len(missingNAS), ssdInfo, nasInfo, nasAvail)
+
+	logger.Printf("status: %d camera files, %d missing from SSD (%s), %d missing from NAS (%s)",
+		len(cameraFiles),
+		len(missingSSD), ui.FormatBytes(ssdInfo.ToBytes),
+		len(missingNAS), ui.FormatBytes(nasInfo.ToBytes))
 	return nil
+}
+
+func totalSize(files []scan.FileInfo) int64 {
+	var n int64
+	for _, f := range files {
+		n += f.Size
+	}
+	return n
 }
 
 func isDir(path string) bool {

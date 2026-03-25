@@ -183,6 +183,9 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 			for i, f := range missing {
 				tasks[i] = copyop.Task{Src: f, DstRelPath: f.DestRelPath(cfg.Category(f.RelPath))}
 			}
+			if err := checkSpace(cfg.SSD, tasks); err != nil {
+				return err
+			}
 			ui.Bold.Printf("\n  Copying %d file(s) to SSD...\n", len(tasks))
 			errs := copyop.RunBatch(tasks, cfg.SSD, logger)
 			fmt.Println()
@@ -244,6 +247,9 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 		tasks[i] = copyop.Task{Src: f, DstRelPath: f.RelPath}
 	}
 
+	if err := checkSpace(cfg.NAS, tasks); err != nil {
+		return err
+	}
 	ui.Bold.Printf("\n  Copying %d file(s) to NAS...\n", len(tasks))
 	logger.Println("Phase 2: SSD → NAS")
 	errs := copyop.RunBatch(tasks, cfg.NAS, logger)
@@ -252,6 +258,20 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 		ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
 	} else {
 		ui.Green.Printf("  ✅  %d file(s) copied and verified.\n", len(tasks))
+	}
+	return nil
+}
+
+// checkSpace returns an error if the destination lacks space for all tasks.
+func checkSpace(dest string, tasks []copyop.Task) error {
+	needed := copyop.TotalSize(tasks)
+	free, err := ui.FreeSpace(dest)
+	if err != nil {
+		return nil // can't determine free space — let the copy proceed
+	}
+	if needed > free {
+		return fmt.Errorf("not enough space on %s: need %s but only %s free",
+			dest, ui.FormatBytes(needed), ui.FormatBytes(free))
 	}
 	return nil
 }

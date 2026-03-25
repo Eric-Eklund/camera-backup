@@ -6,11 +6,38 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Eric-Eklund/camera-backup/internal/checksum"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 	"github.com/Eric-Eklund/camera-backup/internal/ui"
 )
+
+// safeCreate opens a new file for writing, never overwriting an existing file.
+// If dstPath already exists, it appends _1, _2, … before the extension until a
+// free slot is found. Returns the open file and the final path used.
+func safeCreate(dstPath string) (*os.File, string, error) {
+	f, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+	if err == nil {
+		return f, dstPath, nil
+	}
+	if !os.IsExist(err) {
+		return nil, "", err
+	}
+	ext := filepath.Ext(dstPath)
+	stem := strings.TrimSuffix(dstPath, ext)
+	for i := 1; i < 10000; i++ {
+		candidate := fmt.Sprintf("%s_%d%s", stem, i, ext)
+		f, err = os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+		if err == nil {
+			return f, candidate, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("cannot find free filename for %q after 9999 attempts", dstPath)
+}
 
 // Task describes one file to copy: the source file and where it ends up on the destination.
 type Task struct {
@@ -22,10 +49,10 @@ type Task struct {
 // Source is opened read-only. On failure the partial destination file is removed.
 // Modtime is preserved so downstream date-based comparisons remain correct.
 func CopyAndVerify(t Task, dstRoot string, logger *log.Logger) error {
-	dstPath := filepath.Join(dstRoot, t.DstRelPath)
+	intendedPath := filepath.Join(dstRoot, t.DstRelPath)
 
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
-		return fmt.Errorf("mkdir %q: %w", filepath.Dir(dstPath), err)
+	if err := os.MkdirAll(filepath.Dir(intendedPath), 0755); err != nil {
+		return fmt.Errorf("mkdir %q: %w", filepath.Dir(intendedPath), err)
 	}
 
 	src, err := os.OpenFile(t.Src.AbsPath, os.O_RDONLY, 0)
@@ -34,13 +61,13 @@ func CopyAndVerify(t Task, dstRoot string, logger *log.Logger) error {
 	}
 	defer src.Close()
 
-	dst, err := os.Create(dstPath)
+	dst, dstPath, err := safeCreate(intendedPath)
 	if err != nil {
 		return fmt.Errorf("create dest %q: %w", dstPath, err)
 	}
 	defer dst.Close()
 
-	label := filepath.Base(t.Src.RelPath)
+	label := filepath.Base(dstPath)
 	pw := ui.NewProgressWriter(label, t.Src.Size, os.Stdout)
 	if _, err := io.Copy(io.MultiWriter(dst, pw), src); err != nil {
 		pw.Done()
@@ -71,8 +98,24 @@ func CopyAndVerify(t Task, dstRoot string, logger *log.Logger) error {
 		return fmt.Errorf("checksum mismatch %q: src=%s… dst=%s…", t.Src.RelPath, srcHash[:8], dstHash[:8])
 	}
 	ui.Green.Println("✅")
-	logger.Printf("COPY OK  %-50s  sha256=%s", t.DstRelPath, dstHash)
+	logger.Printf("COPY OK  %-50s  sha256=%s", dstPath, dstHash)
+
+	if dstPath != intendedPath {
+		savedRel, _ := filepath.Rel(dstRoot, dstPath)
+		ui.Yellow.Printf("\n  ⚠️  COLLISION: %s already existed — saved as %s\n", t.DstRelPath, savedRel)
+		logger.Printf("COLLISION  original=%s  saved=%s", t.DstRelPath, savedRel)
+	}
+
 	return nil
+}
+
+// TotalSize returns the sum of source file sizes across all tasks.
+func TotalSize(tasks []Task) int64 {
+	var n int64
+	for _, t := range tasks {
+		n += t.Src.Size
+	}
+	return n
 }
 
 // RunBatch copies a slice of tasks to dstRoot.
