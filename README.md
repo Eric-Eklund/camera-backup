@@ -8,14 +8,18 @@ Built in Go. Never deletes or overwrites source files.
 
 ## Workflow
 
-1. Connect camera via USB-C (mounts as a drive, e.g. `E:\`)
+### Daily backup (e.g. on vacation without reliable network)
+
+1. Connect camera via USB-C (mounts as a drive, e.g. `G:\`)
 2. `camera-backup status` — see what needs copying and verify there is enough space
-3. `camera-backup copy`
-   - Copies new files camera → SSD, SHA256 verifies each file
-   - **Pauses** — disconnect and power off camera here
-   - Copies SSD → NAS, SHA256 verifies each file
-4. `camera-backup status` — final check before formatting cards in-camera
-5. `camera-backup verify` — run occasionally to detect silent corruption
+3. `camera-backup copy` — copies camera → SSD with SHA256 verification, then pauses so you can disconnect the camera
+4. `camera-backup sync` — copies SSD → NAS when network is available (videos first); run overnight if needed
+5. `camera-backup verify` — SHA256 check across all destinations; run after sync to confirm integrity
+
+### At home / full sync
+
+1. `camera-backup copy` — camera → SSD (verified) then SSD → NAS
+2. `camera-backup verify` — confirm everything matches
 
 ---
 
@@ -54,7 +58,7 @@ If a destination is not connected it shows as `not available` in red.
 
 ### `camera-backup copy`
 
-Incremental copy with SHA256 verification after each file.
+Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verification after each file (SSD is the source of truth). Phase 2 copies SSD → NAS quickly without per-file verification — run `verify` afterwards to confirm integrity.
 
 ```
   Phase 1: Camera → SSD
@@ -78,20 +82,35 @@ Incremental copy with SHA256 verification after each file.
 
 ════════════════════════════════════════════════════════════
 
-  Phase 2: SSD → NAS
+  SSD → NAS
   ─────────────────────────────────────────
 
-  Copy 13 file(s) to NAS? [y/N]: y
+  Copying 13 file(s) to NAS (videos first)...
   ...
 
-  ✅  13 file(s) copied and verified.
+  ✅  13 file(s) copied.
 ```
 
-If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly after Phase 1. Re-running `copy` later will skip files already on the SSD.
+If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly after Phase 1. Run `camera-backup sync` later to push to NAS — files already there are skipped automatically.
+
+### `camera-backup sync`
+
+Copies files missing from NAS from the SSD. No camera required. Videos are always transferred before photos.
+
+```
+camera-backup sync              # all missing files, videos first
+camera-backup sync --videos-only  # only video files
+camera-backup sync -v             # shorthand
+```
+
+Use this when network becomes available after a `copy` run, or to push only videos when bandwidth is limited.
 
 ### `camera-backup verify`
 
-Deep integrity check — reads every file and computes SHA256. Slow but thorough. Run monthly or after moving drives.
+Deep integrity check — reads every file and computes SHA256. Slow but thorough. Run after `sync` or monthly.
+
+- If camera is connected: verifies camera vs SSD vs NAS
+- If camera is not connected: verifies SSD vs NAS (SSD is used as authority)
 
 By default only failures are printed:
 

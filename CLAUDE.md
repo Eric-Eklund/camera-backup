@@ -25,19 +25,20 @@ go run ./cmd/camera-backup --config testdata/config.toml verify -v
 
 Three-stage incremental backup pipeline: **Camera → SSD → NAS**
 
-Three subcommands (Cobra CLI):
+Four subcommands (Cobra CLI):
 - `status` — scans all three destinations and shows missing file counts + free space
-- `copy` — two-phase copy with SHA256 verification after each file
-- `verify` — deep integrity check (SHA256) across all destinations
+- `copy` — Camera→SSD (CopyAndVerify) then SSD→NAS (fast Copy)
+- `sync` — SSD→NAS only, no camera required; `--videos-only/-v` flag; videos always first
+- `verify` — deep SHA256 check; uses camera as authority, falls back to SSD if camera absent
 
 **Package responsibilities:**
 
 | Package | Role |
 |---|---|
-| `cmd/camera-backup` | CLI entry point, `runCopy()` orchestration, logging init |
+| `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` orchestration, logging init |
 | `internal/config` | TOML loading, extension matching, `Category()` (photos/videos) |
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
-| `internal/copyop` | Atomic copy with `O_EXCL`, collision suffix (`_1`, `_2`…), batch runner |
+| `internal/copyop` | `CopyAndVerify` (Sync+SHA256, Camera→SSD), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)` |
 | `internal/checksum` | SHA256 with optional progress writer |
 | `internal/status` | Status command logic |
 | `internal/verify` | Verify command logic, uses camera as authority (falls back to SSD) |
