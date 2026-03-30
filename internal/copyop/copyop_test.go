@@ -90,9 +90,9 @@ func TestSafeCreate_NoExtension(t *testing.T) {
 	}
 }
 
-// ── CopyAndVerify ─────────────────────────────────────────────────────────────
+// ── Copy ─────────────────────────────────────────────────────────────
 
-func TestCopyAndVerify_Success(t *testing.T) {
+func TestCopy_Success(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 	logger := log.New(io.Discard, "", 0)
@@ -108,8 +108,8 @@ func TestCopyAndVerify_Success(t *testing.T) {
 		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
 	}
 
-	if err := CopyAndVerify(task, dst, logger); err != nil {
-		t.Fatalf("CopyAndVerify: %v", err)
+	if err := Copy(task, dst, logger); err != nil {
+		t.Fatalf("Copy: %v", err)
 	}
 
 	dstFile := filepath.Join(dst, "photos/2026-03-25/DSC_0001.NEF")
@@ -125,7 +125,7 @@ func TestCopyAndVerify_Success(t *testing.T) {
 	}
 }
 
-func TestCopyAndVerify_NeverOverwrites(t *testing.T) {
+func TestCopy_NeverOverwrites(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 	logger := log.New(io.Discard, "", 0)
@@ -148,8 +148,8 @@ func TestCopyAndVerify_NeverOverwrites(t *testing.T) {
 		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
 	}
 
-	if err := CopyAndVerify(task, dst, logger); err != nil {
-		t.Fatalf("CopyAndVerify: %v", err)
+	if err := Copy(task, dst, logger); err != nil {
+		t.Fatalf("Copy: %v", err)
 	}
 
 	// Original must be untouched.
@@ -166,13 +166,13 @@ func TestCopyAndVerify_NeverOverwrites(t *testing.T) {
 	}
 }
 
-func TestCopyAndVerify_MissingSource(t *testing.T) {
+func TestCopy_MissingSource(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	task := Task{
 		Src:        scan.FileInfo{AbsPath: "/nonexistent/DSC_0001.NEF", RelPath: "DSC_0001.NEF", Size: 100, ModTime: time.Now()},
 		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
 	}
-	if err := CopyAndVerify(task, t.TempDir(), logger); err == nil {
+	if err := Copy(task, t.TempDir(), logger); err == nil {
 		t.Fatal("expected error for missing source")
 	}
 }
@@ -215,7 +215,7 @@ func TestRunBatch_AllSucceed(t *testing.T) {
 		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "C.JPG"), RelPath: "C.JPG", Size: 4, ModTime: modtime}, DstRelPath: "photos/2026-03-25/C.JPG"},
 	}
 
-	if errs := RunBatch(tasks, dst, logger); errs != 0 {
+	if errs := RunBatch(tasks, dst, logger, false); errs != 0 {
 		t.Errorf("errCount = %d, want 0", errs)
 	}
 }
@@ -234,12 +234,12 @@ func TestRunBatch_CountsErrors(t *testing.T) {
 		{Src: scan.FileInfo{AbsPath: "/nonexistent.NEF", RelPath: "missing.NEF", Size: 100, ModTime: modtime}, DstRelPath: "photos/2026-03-25/missing.NEF"},
 	}
 
-	if errs := RunBatch(tasks, dst, logger); errs != 1 {
+	if errs := RunBatch(tasks, dst, logger, false); errs != 1 {
 		t.Errorf("errCount = %d, want 1", errs)
 	}
 }
 
-func TestCopyAndVerify_CollisionLogged(t *testing.T) {
+func TestCopy_CollisionLogged(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
@@ -261,8 +261,8 @@ func TestCopyAndVerify_CollisionLogged(t *testing.T) {
 		Src:        scan.FileInfo{AbsPath: srcFile, RelPath: "DCIM/DSC_0001.NEF", Size: int64(len(content)), ModTime: modtime},
 		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
 	}
-	if err := CopyAndVerify(task, dst, logger); err != nil {
-		t.Fatalf("CopyAndVerify: %v", err)
+	if err := Copy(task, dst, logger); err != nil {
+		t.Fatalf("Copy: %v", err)
 	}
 
 	entry := logBuf.String()
@@ -291,7 +291,7 @@ func TestRunBatch_ContinuesAfterError(t *testing.T) {
 		{Src: scan.FileInfo{AbsPath: lastFile, RelPath: "last.NEF", Size: 4, ModTime: modtime}, DstRelPath: "photos/2026-03-25/last.NEF"},
 	}
 
-	RunBatch(tasks, dst, logger)
+	RunBatch(tasks, dst, logger, false)
 
 	// last.NEF should have been copied despite the earlier error.
 	if _, err := os.Stat(filepath.Join(dst, "photos/2026-03-25/last.NEF")); err != nil {

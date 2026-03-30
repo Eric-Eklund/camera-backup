@@ -2,6 +2,7 @@ package scan
 
 import (
 	"io/fs"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -29,9 +30,11 @@ func (f FileInfo) Key() string {
 //
 //	"photos/2026-03-24/DSC_0001.NEF"
 //	"videos/2026-03-24/VIDEO001.MOV"
+//
+// Always uses forward slashes so keys are consistent across platforms.
 func (f FileInfo) DestRelPath(category string) string {
 	date := f.ModTime.Format("2006-01-02")
-	return filepath.Join(category, date, filepath.Base(f.RelPath))
+	return path.Join(category, date, filepath.Base(f.RelPath))
 }
 
 // DestKey returns a lowercased DestRelPath for map lookups.
@@ -69,7 +72,7 @@ func Walk(root string, exts []string) ([]FileInfo, error) {
 			return err
 		}
 		files = append(files, FileInfo{
-			RelPath: rel,
+			RelPath: filepath.ToSlash(rel),
 			AbsPath: path,
 			Size:    info.Size(),
 			ModTime: info.ModTime(),

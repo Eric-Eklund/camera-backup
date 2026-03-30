@@ -72,11 +72,11 @@ func TestWalk_RecursiveSubdirs(t *testing.T) {
 
 func TestDestRelPath(t *testing.T) {
 	f := scan.FileInfo{
-		RelPath: filepath.Join("DCIM", "100NIKON", "DSC_0001.NEF"),
+		RelPath: "DCIM/100NIKON/DSC_0001.NEF",
 		ModTime: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC),
 	}
 	got := f.DestRelPath("photos")
-	want := filepath.Join("photos", "2026-03-25", "DSC_0001.NEF")
+	want := "photos/2026-03-25/DSC_0001.NEF"
 	if got != want {
 		t.Errorf("DestRelPath = %q, want %q", got, want)
 	}

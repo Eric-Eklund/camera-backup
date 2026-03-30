@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,6 +50,7 @@ Typical workflow:
 	root.AddCommand(
 		newStatusCmd(&configPath),
 		newCopyCmd(&configPath),
+		newSyncCmd(&configPath),
 		newVerifyCmd(&configPath),
 	)
 
@@ -126,6 +128,29 @@ func newCopyCmd(configPath *string) *cobra.Command {
 	}
 }
 
+func newSyncCmd(configPath *string) *cobra.Command {
+	var videosOnly bool
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Copy missing files SSD→NAS (no camera required)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger, cleanup, err := initLogger()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			cfg, err := mustLoadConfig(*configPath)
+			if err != nil {
+				return err
+			}
+			return runSync(cfg, logger, videosOnly)
+		},
+	}
+	cmd.Flags().BoolVarP(&videosOnly, "videos-only", "v", false, "Only sync video files to NAS")
+	return cmd
+}
+
 func newVerifyCmd(configPath *string) *cobra.Command {
 	var verbose bool
 	cmd := &cobra.Command{
@@ -187,7 +212,7 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 				return err
 			}
 			ui.Bold.Printf("\n  Copying %d file(s) to SSD...\n", len(tasks))
-			errs := copyop.RunBatch(tasks, cfg.SSD, logger)
+			errs := copyop.RunBatch(tasks, cfg.SSD, logger, true)
 			fmt.Println()
 			if errs > 0 {
 				ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
@@ -205,28 +230,52 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 	ui.Prompt("  Press Enter when ready to continue to NAS...")
 	ui.PrintSeparator()
 
-	// ── Phase 2: SSD → NAS (alla filer) ──────────────────────────────────────
-	ui.Bold.Println("  Phase 2: SSD → NAS")
+	// ── Phase 2: SSD → NAS ────────────────────────────────────────────────────
+	return runSync(cfg, logger, false)
+}
+
+// runSync copies files from SSD that are missing on the NAS.
+// If videosOnly is true only video files are synced.
+// Videos are always transferred before photos so they are prioritised if the
+// connection is lost mid-run.
+// It is called by both the copy command (phase 2) and the standalone sync command.
+func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
+	exts := cfg.NormalisedExtensions()
+
+	ui.Bold.Println("  SSD → NAS")
 	fmt.Println("  ─────────────────────────────────────────")
 
 	nasAvail := cfg.NAS != "" && isDir(cfg.NAS)
 	if !nasAvail {
 		fmt.Println()
 		ui.Yellow.Printf("  NAS not available at %s\n", cfg.NAS)
-		ui.Yellow.Println("  Connect to VPN or ensure the NAS drive is mapped, then re-run:")
-		ui.Dim.Println("    camera-backup copy")
-		ui.Dim.Println("  (Files already on SSD will be skipped automatically.)")
-		logger.Println("Phase 2 skipped: NAS not available")
+		ui.Yellow.Println("  Connect to VPN or ensure the NAS drive is mapped, then run:")
+		ui.Dim.Println("    camera-backup sync")
+		logger.Println("SSD→NAS skipped: NAS not available")
 		return nil
 	}
 
-	// Rescan SSD after Phase 1 — include files just copied.
-	ssdFilesNow, _ := scan.Walk(cfg.SSD, exts)
+	ssdFiles, _ := scan.Walk(cfg.SSD, exts)
 	nasFiles, _ := scan.Walk(cfg.NAS, exts)
 	nasIndex := scan.IndexByRelPath(nasFiles)
+	toNAS := scan.MissingByRelPath(ssdFiles, nasIndex)
 
-	// SSD files already have category/date/filename as RelPath — compare directly.
-	toNAS := scan.MissingByRelPath(ssdFilesNow, nasIndex)
+	// Filter to videos only if requested.
+	if videosOnly {
+		var filtered []scan.FileInfo
+		for _, f := range toNAS {
+			if cfg.Category(f.RelPath) == "videos" {
+				filtered = append(filtered, f)
+			}
+		}
+		toNAS = filtered
+	} else {
+		// Always send videos before photos so large files are prioritised.
+		sort.SliceStable(toNAS, func(i, j int) bool {
+			return cfg.Category(toNAS[i].RelPath) == "videos" &&
+				cfg.Category(toNAS[j].RelPath) != "videos"
+		})
+	}
 
 	if len(toNAS) == 0 {
 		ui.Green.Println("\n  NAS is already up to date — nothing to copy.")
@@ -234,14 +283,6 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 		return nil
 	}
 
-	fmt.Println()
-	if !ui.AskYesNo(fmt.Sprintf("  Copy %d file(s) to NAS? [y/N]: ", len(toNAS))) {
-		ui.Dim.Println("  Skipped NAS copy.")
-		logger.Println("NAS copy skipped by user")
-		return nil
-	}
-
-	// For SSD→NAS the dest path equals the source RelPath (same structure).
 	tasks := make([]copyop.Task, len(toNAS))
 	for i, f := range toNAS {
 		tasks[i] = copyop.Task{Src: f, DstRelPath: f.RelPath}
@@ -250,14 +291,19 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 	if err := checkSpace(cfg.NAS, tasks); err != nil {
 		return err
 	}
-	ui.Bold.Printf("\n  Copying %d file(s) to NAS...\n", len(tasks))
-	logger.Println("Phase 2: SSD → NAS")
-	errs := copyop.RunBatch(tasks, cfg.NAS, logger)
+	if videosOnly {
+		ui.Bold.Printf("\n  Copying %d video(s) to NAS...\n", len(tasks))
+		logger.Println("SSD → NAS (videos only)")
+	} else {
+		ui.Bold.Printf("\n  Copying %d file(s) to NAS (videos first)...\n", len(tasks))
+		logger.Println("SSD → NAS")
+	}
+	errs := copyop.RunBatch(tasks, cfg.NAS, logger, false)
 	fmt.Println()
 	if errs > 0 {
 		ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
 	} else {
-		ui.Green.Printf("  ✅  %d file(s) copied and verified.\n", len(tasks))
+		ui.Green.Printf("  ✅  %d file(s) copied.\n", len(tasks))
 	}
 	return nil
 }
