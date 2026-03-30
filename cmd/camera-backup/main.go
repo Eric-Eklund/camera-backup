@@ -185,13 +185,15 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 	ui.Bold.Println("\n  Phase 1: Camera → SSD")
 	fmt.Println("  ─────────────────────────────────────────")
 
+	phase1Ran := false
 	if !sourceAvail {
 		ui.Yellow.Printf("  Camera not available at %s — skipping.\n", cfg.Source)
-		ui.Yellow.Println("  If you only need SSD → NAS, connect to your NAS and re-run.")
+		ui.Yellow.Println("  To sync SSD → NAS only, run: camera-backup sync")
 		logger.Println("Phase 1 skipped: camera not available")
 	} else if !ssdAvail {
 		return fmt.Errorf("SSD not accessible at %s", cfg.SSD)
 	} else {
+		phase1Ran = true
 		cameraFiles, err := scan.Walk(cfg.Source, exts)
 		if err != nil {
 			return err
@@ -215,19 +217,25 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 			errs := copyop.RunBatch(tasks, cfg.SSD, logger, true)
 			fmt.Println()
 			if errs > 0 {
-				ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
-			} else {
-				ui.Green.Printf("  ✅  %d file(s) copied and verified.\n", len(tasks))
+				ui.Red.Printf("  ❌  %d file(s) failed to copy — do not disconnect the camera.\n", errs)
+				ui.Red.Println("  Check the log, fix the issue, and re-run.")
+				return fmt.Errorf("%d file(s) failed during Camera → SSD", errs)
 			}
+			ui.Green.Printf("  ✅  %d file(s) copied and verified.\n", len(tasks))
 		}
 	}
 
 	// ── Pause ─────────────────────────────────────────────────────────────────
 	ui.PrintSeparator()
-	ui.Bold.Println("  Camera backup to SSD is complete.")
-	fmt.Println("  You may now disconnect and power off the camera.")
-	fmt.Println()
-	ui.Prompt("  Press Enter when ready to continue to NAS...")
+	if phase1Ran {
+		ui.Bold.Println("  Camera backup to SSD is complete.")
+		fmt.Println("  You may now disconnect and power off the camera.")
+		fmt.Println()
+	}
+	if !ui.AskYesNo("  Continue to sync SSD → NAS? [y/n]: ") {
+		logger.Println("Phase 2 skipped: user declined")
+		return nil
+	}
 	ui.PrintSeparator()
 
 	// ── Phase 2: SSD → NAS ────────────────────────────────────────────────────
