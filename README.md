@@ -12,7 +12,7 @@ Built in Go. Never deletes or overwrites source files.
 
 1. Connect camera via USB-C (mounts as a drive, e.g. `G:\`)
 2. `camera-backup status` — see what needs copying and verify there is enough space
-3. `camera-backup copy` — copies camera → SSD with SHA256 verification, then pauses so you can disconnect the camera
+3. `camera-backup copy` — copies camera → SSD with SHA256 verification, then asks whether to continue to NAS (disconnect the camera first)
 4. `camera-backup sync` — copies SSD → NAS when network is available (videos first); run overnight if needed
 5. `camera-backup verify` — SHA256 check across all destinations; run after sync to confirm integrity
 
@@ -78,7 +78,7 @@ Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verificati
   Camera backup to SSD is complete.
   You may now disconnect and power off the camera.
 
-  Press Enter when ready to continue to NAS...
+  Continue to sync SSD → NAS? [y/n]:
 
 ════════════════════════════════════════════════════════════
 
