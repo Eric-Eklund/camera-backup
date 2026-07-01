@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
+	"github.com/Eric-Eklund/camera-backup/internal/tui"
 	"github.com/Eric-Eklund/camera-backup/internal/ui"
 	"github.com/Eric-Eklund/camera-backup/internal/verify"
 )
@@ -52,6 +54,7 @@ Typical workflow:
 		newCopyCmd(&configPath),
 		newSyncCmd(&configPath),
 		newVerifyCmd(&configPath),
+		newTUICmd(&configPath),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -336,4 +339,29 @@ func isDir(path string) bool {
 	}
 	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
+}
+
+func newTUICmd(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "tui",
+		Short: "Interactive TUI for camera backup",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger, cleanup, err := initLogger()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			cfg, err := mustLoadConfig(*configPath)
+			if err != nil {
+				return err
+			}
+
+			m := tui.New(cfg, logger)
+			p := tea.NewProgram(m, tea.WithAltScreen())
+			m.SetProgram(p)
+			_, err = p.Run()
+			return err
+		},
+	}
 }
