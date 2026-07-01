@@ -2,7 +2,6 @@ package tui
 
 import (
 	"image"
-	"time"
 
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
@@ -20,6 +19,12 @@ type fileProgressMsg struct {
 
 type phase1DoneMsg struct {
 	failures int
+}
+
+// phase2ReadyMsg carries freshly scanned SSD→NAS tasks after Phase 1 completes.
+type phase2ReadyMsg struct {
+	tasks []copyop.Task
+	err   error
 }
 
 type copyDoneMsg struct {
@@ -41,6 +46,11 @@ type thumbnailMsg struct {
 	err  error
 }
 
-type deviceChangedMsg struct{}
+// fullImageMsg carries a full-resolution preview image (for ScreenPreview).
+type fullImageMsg struct {
+	file string
+	img  image.Image
+	err  error
+}
 
-type tickMsg time.Time
+type deviceChangedMsg struct{}

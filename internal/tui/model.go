@@ -6,12 +6,14 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
+	"github.com/Eric-Eklund/camera-backup/internal/preview"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
 	"github.com/Eric-Eklund/camera-backup/internal/verify"
@@ -63,7 +65,9 @@ type Model struct {
 
 	// status scan
 	status    *status.StatusResult
-	statusMsg string // shown in status bar while scanning
+	statusMsg string          // shown in status bar while scanning
+	ssdKeys   map[string]bool // lowercased dest relpaths present on SSD
+	nasKeys   map[string]bool // lowercased dest relpaths present on NAS
 
 	// tabs: e.g. ["All (312)", "Missing on SSD (12)", "Missing on NAS (47)"]
 	tabs      []string
@@ -79,10 +83,14 @@ type Model struct {
 	expanded     map[string]bool             // "year", "year/month", "year/month/day" → expanded
 	visible      []treeNode
 	cursor       int
+	selected     map[string]bool             // absPath → selected; empty = operate on all
 
 	// detail / preview
 	thumbCache   map[string]image.Image // absPath → decoded image (nil = unsupported)
-	loadingThumb string
+	loadingThumb map[string]bool        // absPath → thumbnail load in flight
+	fullCache    map[string]image.Image // absPath → full-size preview (nil = unsupported)
+	loadingFull  map[string]bool        // absPath → full image load in flight
+	kitty        bool                   // terminal supports Kitty Graphics Protocol
 	prevScreen   Screen
 	gridYear     string
 	gridMonth    string
@@ -90,17 +98,19 @@ type Model struct {
 	gridCursor   int
 
 	// copy/verify progress
-	progressMode progressMode
-	fileProgress map[string]copyop.FileProgress
-	copyDone     int
-	copyTotal    int
-	failedFiles  []copyop.FileProgress
-	events       chan copyop.FileProgress
+	progressMode  progressMode
+	fileProgress  map[string]copyop.FileProgress
+	progressOrder []string                 // RelPaths in first-seen order for stable rendering
+	fileStart     map[string]time.Time     // RelPath → first event time, for speed calc
+	copyDone      int
+	copyTotal     int
+	copyBytes     int64 // total bytes across all tasks in the running batch
+	failedFiles   []copyop.FileProgress
 
 	// verify progress
-	verifyResults []verify.FileResult
-	verifyDone    int
-	verifyTotal   int
+	verifyIssues []verify.FileResult // files with problems, shown on error screen
+	verifyDone   int
+	verifyTotal  int
 
 	failures int
 	doneMsg  string
@@ -121,13 +131,19 @@ const (
 // New creates a new TUI model.
 func New(cfg *config.Config, logger *log.Logger) *Model {
 	return &Model{
-		cfg:        cfg,
-		logger:     logger,
-		screen:     screenLoading,
-		statusMsg:  "Scanning devices…",
-		thumbCache: map[string]image.Image{},
-		expanded:   map[string]bool{},
+		cfg:          cfg,
+		logger:       logger,
+		screen:       screenLoading,
+		statusMsg:    "Scanning devices…",
+		thumbCache:   map[string]image.Image{},
+		loadingThumb: map[string]bool{},
+		fullCache:    map[string]image.Image{},
+		loadingFull:  map[string]bool{},
+		kitty:        preview.KittySupported(),
+		expanded:     map[string]bool{},
+		selected:     map[string]bool{},
 		fileProgress: map[string]copyop.FileProgress{},
+		fileStart:    map[string]time.Time{},
 	}
 }
 
@@ -156,6 +172,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case statusReadyMsg:
+		// Only apply on the loading/main screens — never yank the user out of a
+		// running operation, confirm dialog, or preview.
+		if m.screen != screenLoading && m.screen != screenMain {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.lastErr = msg.err
 			m.screen = screenDone
@@ -163,18 +184,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = msg.result
+		m.ssdKeys = relPathSet(msg.result.SSDFiles)
+		m.nasKeys = relPathSet(msg.result.NASFiles)
 		m.buildTabs()
 		m.setTab(m.activeTab)
 		m.screen = screenMain
 		m.statusMsg = ""
-		return m, nil
+		return m, m.maybeLoadThumb()
 
 	case deviceChangedMsg:
+		// Ignore device events during operations; a fresh scan runs when the
+		// user returns to the main screen anyway.
+		if m.screen != screenMain && m.screen != screenLoading {
+			return m, nil
+		}
 		m.statusMsg = "Rescanning…"
 		return m, statusScanCmd(m.cfg, m.logger)
 
 	case fileProgressMsg:
 		fp := msg.p
+		if _, seen := m.fileProgress[fp.RelPath]; !seen {
+			m.progressOrder = append(m.progressOrder, fp.RelPath)
+			m.fileStart[fp.RelPath] = time.Now()
+		}
 		m.fileProgress[fp.RelPath] = fp
 		if fp.Done {
 			m.copyDone++
@@ -186,27 +218,60 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case phase1DoneMsg:
 		m.failures = msg.failures
-		if m.status != nil && m.status.NASAvail && len(m.phase2Tasks) > 0 {
-			m.screen = screenConfirm
-			return m, nil
+		copied := m.copyTotal - msg.failures
+		if m.status != nil && m.status.NASAvail {
+			// Rescan SSD vs NAS so Phase 2 copies from the SSD (never the
+			// camera) and picks up everything Phase 1 just wrote.
+			m.statusMsg = "Scanning SSD → NAS…"
+			return m, preparePhase2Cmd(m.cfg, m.logger)
 		}
 		m.screen = screenDone
-		m.doneMsg = fmt.Sprintf("Phase 1 complete. %d files copied.", m.copyTotal)
-		return m, statusScanCmd(m.cfg, m.logger)
+		m.doneMsg = fmt.Sprintf("Phase 1 complete: %d of %d files copied to SSD.", copied, m.copyTotal)
+		return m, nil
+
+	case phase2ReadyMsg:
+		m.statusMsg = ""
+		if msg.err != nil {
+			m.lastErr = msg.err
+			m.screen = screenDone
+			m.doneMsg = "Phase 2 scan failed: " + msg.err.Error()
+			return m, nil
+		}
+		if len(msg.tasks) == 0 {
+			m.screen = screenDone
+			m.doneMsg = "Phase 1 complete — NAS is already up to date."
+			return m, nil
+		}
+		m.phase2Tasks = msg.tasks
+		m.screen = screenConfirm
+		return m, nil
 
 	case copyDoneMsg:
 		m.failures += msg.failures
 		m.screen = screenDone
-		m.doneMsg = "Copy complete."
-		return m, statusScanCmd(m.cfg, m.logger)
+		if m.failures > 0 {
+			m.doneMsg = fmt.Sprintf("Copy finished: %d of %d files copied, %d failed.",
+				m.copyDone-m.failures, m.copyTotal, m.failures)
+		} else {
+			m.doneMsg = fmt.Sprintf("Copy complete: %d files.", m.copyDone)
+		}
+		return m, nil
+
+	case verifyFileMsg:
+		m.verifyDone = msg.done
+		m.verifyTotal = msg.total
+		if len(msg.result.Issues) > 0 {
+			m.verifyIssues = append(m.verifyIssues, msg.result)
+		}
 
 	case verifyDoneMsg:
-		m.verifyDone = msg.total
-		m.verifyTotal = msg.total
 		m.screen = screenDone
-		if msg.bad == 0 {
+		switch {
+		case msg.bad < 0:
+			m.doneMsg = "Verify failed to run — check the log."
+		case msg.bad == 0:
 			m.doneMsg = fmt.Sprintf("All %d files verified OK.", msg.total)
-		} else {
+		default:
 			m.doneMsg = fmt.Sprintf("%d / %d files have issues.", msg.bad, msg.total)
 		}
 
@@ -216,12 +281,41 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.err == nil {
 			m.thumbCache[msg.file] = nil // unsupported type; don't retry
 		}
-		if m.loadingThumb == msg.file {
-			m.loadingThumb = ""
+		delete(m.loadingThumb, msg.file)
+
+	case fullImageMsg:
+		if msg.err == nil {
+			m.fullCache[msg.file] = msg.img // may be nil = unsupported
+		}
+		delete(m.loadingFull, msg.file)
+		// If this is the file currently on the preview screen, draw it.
+		if m.screen == screenPreview && m.kitty && msg.img != nil {
+			if f := m.previewFile(); f != nil && f.AbsPath == msg.file {
+				return m, m.kittyPreviewCmd(msg.img)
+			}
 		}
 	}
 
 	return m, nil
+}
+
+// previewFile returns the file currently shown on the preview screen.
+func (m *Model) previewFile() *scan.FileInfo {
+	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
+	if m.gridCursor < 0 || m.gridCursor >= len(files) {
+		return nil
+	}
+	return &files[m.gridCursor]
+}
+
+// kittyPreviewCmd draws img in the preview screen's image area.
+func (m *Model) kittyPreviewCmd(img image.Image) tea.Cmd {
+	cols := m.width - 4
+	rows := m.height - 4
+	if cols < 1 || rows < 1 {
+		return nil
+	}
+	return kittyDrawCmd(img, cols, rows, 3, 3)
 }
 
 // handleKey processes keyboard input based on the current screen.
@@ -259,16 +353,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case screenDone:
 		switch msg.String() {
-		case "r":
+		case "r", "esc", "enter":
 			m.screen = screenLoading
 			m.statusMsg = "Scanning devices…"
 			m.fileProgress = map[string]copyop.FileProgress{}
+			m.progressOrder = nil
+			m.fileStart = map[string]time.Time{}
 			m.failures = 0
 			m.failedFiles = nil
+			m.verifyIssues = nil
 			m.copyDone, m.copyTotal = 0, 0
 			return m, statusScanCmd(m.cfg, m.logger)
 		case "e":
-			if len(m.failedFiles) > 0 {
+			if len(m.failedFiles) > 0 || len(m.verifyIssues) > 0 {
 				m.screen = screenErrors
 			}
 		case "q", "ctrl+c":
@@ -320,9 +417,14 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.expanded[key] = !m.expanded[key]
 			m.rebuildVisible()
 		} else {
-			// File node: open full preview.
+			// File node: open full preview of this file.
 			m.prevScreen = screenMain
+			m.gridYear = node.year
+			m.gridMonth = node.month
+			m.gridDay = node.day
+			m.gridCursor = node.fileIdx
 			m.screen = screenPreview
+			return m, m.loadThumbsForPreview()
 		}
 
 	case "g", "G":
@@ -338,30 +440,136 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.gridDay = node.day
 			m.gridCursor = 0
 			m.screen = screenGrid
+			return m, m.loadThumbsForDay(node.year, node.month, node.day)
 		}
+
+	case "v", "V":
+		return m.startVerify()
 
 	case "y", "Y":
 		return m.startCopy()
 
 	case "a":
-		// select/deselect all (future selection feature placeholder)
+		m.toggleSelectAll()
 
 	case " ":
-		// toggle selection (future feature placeholder)
+		m.toggleSelect()
 	}
 	return m, nil
+}
+
+// toggleSelect toggles selection of the focused file, or all files under the
+// focused year/month/day group.
+func (m *Model) toggleSelect() {
+	if len(m.visible) == 0 || m.cursor >= len(m.visible) {
+		return
+	}
+	node := m.visible[m.cursor]
+	files := m.nodeFiles(node)
+	if len(files) == 0 {
+		return
+	}
+	// If every file under the node is selected, deselect; otherwise select all.
+	all := true
+	for _, f := range files {
+		if !m.selected[f.AbsPath] {
+			all = false
+			break
+		}
+	}
+	for _, f := range files {
+		if all {
+			delete(m.selected, f.AbsPath)
+		} else {
+			m.selected[f.AbsPath] = true
+		}
+	}
+}
+
+// toggleSelectAll selects every file in the current tab, or clears the
+// selection if everything is already selected.
+func (m *Model) toggleSelectAll() {
+	all := true
+	for _, f := range m.allFiles {
+		if !m.selected[f.AbsPath] {
+			all = false
+			break
+		}
+	}
+	for _, f := range m.allFiles {
+		if all {
+			delete(m.selected, f.AbsPath)
+		} else {
+			m.selected[f.AbsPath] = true
+		}
+	}
+}
+
+// nodeFiles returns the files under a tree node: one file for a file node,
+// all files in the group for year/month/day nodes.
+func (m *Model) nodeFiles(node treeNode) []scan.FileInfo {
+	switch node.level {
+	case 3:
+		files := m.dayFiles(node.year, node.month, node.day)
+		if node.fileIdx < len(files) {
+			return files[node.fileIdx : node.fileIdx+1]
+		}
+		return nil
+	case 2:
+		return m.dayFiles(node.year, node.month, node.day)
+	case 1:
+		var out []scan.FileInfo
+		for _, day := range m.dayOrder[node.year][node.month] {
+			out = append(out, m.dayFiles(node.year, node.month, day)...)
+		}
+		return out
+	default:
+		var out []scan.FileInfo
+		for _, month := range m.monthOrder[node.year] {
+			for _, day := range m.dayOrder[node.year][month] {
+				out = append(out, m.dayFiles(node.year, month, day)...)
+			}
+		}
+		return out
+	}
+}
+
+// selectedIn returns the subset of files that are selected. If the selection
+// is empty, all files are returned (no selection = operate on everything).
+func (m *Model) selectedIn(files []scan.FileInfo) []scan.FileInfo {
+	if len(m.selected) == 0 {
+		return files
+	}
+	var out []scan.FileInfo
+	for _, f := range files {
+		if f.AbsPath != "" && m.selected[f.AbsPath] {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func (m *Model) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
 	switch msg.String() {
 	case "esc", "q":
-		m.screen = m.prevScreen
+		m.screen = screenMain
 	case "ctrl+c":
 		return m, tea.Quit
 	case "p", "enter":
 		if m.gridCursor < len(files) {
+			m.prevScreen = screenGrid
 			m.screen = screenPreview
+			return m, m.loadThumbsForPreview()
+		}
+	case " ":
+		if m.gridCursor < len(files) {
+			f := files[m.gridCursor]
+			if m.selected[f.AbsPath] {
+				delete(m.selected, f.AbsPath)
+			} else {
+				m.selected[f.AbsPath] = true
+			}
 		}
 	case "left", "h":
 		if m.gridCursor > 0 {
@@ -389,23 +597,87 @@ func (m *Model) handlePreviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
 	switch msg.String() {
 	case "esc", "q":
+		if m.kitty {
+			preview.KittyClear()
+		}
 		if m.prevScreen == screenGrid {
 			m.screen = screenGrid
 		} else {
 			m.screen = screenMain
 		}
 	case "ctrl+c":
+		if m.kitty {
+			preview.KittyClear()
+		}
 		return m, tea.Quit
 	case "left", "h":
 		if m.gridCursor > 0 {
 			m.gridCursor--
+			return m, m.loadThumbsForPreview()
 		}
 	case "right", "l":
 		if m.gridCursor < len(files)-1 {
 			m.gridCursor++
+			return m, m.loadThumbsForPreview()
 		}
 	}
 	return m, nil
+}
+
+// loadThumbsForDay fires thumbnail loads for every uncached file in a date
+// group (capped to keep exiftool fan-out reasonable).
+func (m *Model) loadThumbsForDay(year, month, day string) tea.Cmd {
+	const maxLoads = 32
+	files := m.dayFiles(year, month, day)
+	var cmds []tea.Cmd
+	for i, f := range files {
+		if i >= maxLoads {
+			break
+		}
+		if cmd := m.loadThumb(f.AbsPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// loadThumbsForPreview loads the focused preview file (full size) plus
+// thumbnails for its neighbours, and draws via Kitty when already cached.
+func (m *Model) loadThumbsForPreview() tea.Cmd {
+	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
+	var cmds []tea.Cmd
+	for _, idx := range []int{m.gridCursor, m.gridCursor - 1, m.gridCursor + 1} {
+		if idx < 0 || idx >= len(files) {
+			continue
+		}
+		if cmd := m.loadThumb(files[idx].AbsPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	// Full-resolution image for the focused file.
+	if f := m.previewFile(); f != nil {
+		if img, cached := m.fullCache[f.AbsPath]; cached {
+			if m.kitty && img != nil {
+				cmds = append(cmds, m.kittyPreviewCmd(img))
+			}
+		} else if !m.loadingFull[f.AbsPath] {
+			m.loadingFull[f.AbsPath] = true
+			cmds = append(cmds, fullImageCmd(f.AbsPath))
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// loadThumb returns a thumbnailCmd for absPath unless already cached or loading.
+func (m *Model) loadThumb(absPath string) tea.Cmd {
+	if _, cached := m.thumbCache[absPath]; cached {
+		return nil
+	}
+	if m.loadingThumb[absPath] {
+		return nil
+	}
+	m.loadingThumb[absPath] = true
+	return thumbnailCmd(absPath)
 }
 
 // buildTabs constructs the tab list based on device availability.
@@ -586,17 +858,22 @@ func (m *Model) maybeLoadThumb() tea.Cmd {
 		return nil
 	}
 	f := m.tree[node.year][node.month][node.day][node.fileIdx]
-	if _, cached := m.thumbCache[f.AbsPath]; cached {
-		return nil
-	}
-	if m.loadingThumb == f.AbsPath {
-		return nil
-	}
-	m.loadingThumb = f.AbsPath
-	return thumbnailCmd(f.AbsPath)
+	return m.loadThumb(f.AbsPath)
+}
+
+// resetProgress clears all per-batch progress state.
+func (m *Model) resetProgress(total int, totalBytes int64) {
+	m.copyTotal = total
+	m.copyDone = 0
+	m.copyBytes = totalBytes
+	m.fileProgress = map[string]copyop.FileProgress{}
+	m.progressOrder = nil
+	m.fileStart = map[string]time.Time{}
 }
 
 // startCopy determines which phase(s) to run and launches them.
+// If a selection is active, only selected files are copied (camera→SSD and
+// sync modes); Phase 2 after a camera copy always pushes everything missing.
 func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 	if m.status == nil {
 		return m, nil
@@ -605,29 +882,34 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 
 	m.failures = 0
 	m.failedFiles = nil
-	m.fileProgress = map[string]copyop.FileProgress{}
 
 	switch {
 	case r.SourceAvail && r.SSDAvail:
 		// Phase 1: Camera→SSD (with verify); Phase 2: SSD→NAS (if available).
-		tasks := buildPhase1Tasks(r, m.cfg)
-		if len(tasks) == 0 && !r.NASAvail {
+		missing := m.selectedIn(r.MissingOnSSD)
+		if len(m.selected) > 0 && len(missing) == 0 {
+			m.statusMsg = "No selected files need copying to SSD."
 			return m, nil
 		}
-		m.copyTotal = len(tasks)
-		m.copyDone = 0
-		m.progressMode = modePhase1
-
-		// Cache phase 2 tasks for after confirmation.
-		if r.NASAvail {
-			// Phase 2 tasks are built from the CURRENT status; after phase 1 completes
-			// we re-scan — but for the confirm screen we pre-compute from missing-on-NAS.
-			m.phase2Tasks = buildPhase2Tasks(r)
+		sub := &status.StatusResult{MissingOnSSD: missing}
+		tasks := buildPhase1Tasks(sub, m.cfg)
+		if len(tasks) == 0 {
+			if !r.NASAvail {
+				m.statusMsg = "SSD is already up to date."
+				return m, nil
+			}
+			// Nothing for Phase 1 — go straight to the Phase 2 scan.
+			m.statusMsg = "Scanning SSD → NAS…"
+			return m, preparePhase2Cmd(m.cfg, m.logger)
 		}
-
+		if err := checkSpace(m.cfg.SSD, tasks); err != nil {
+			m.statusMsg = err.Error()
+			return m, nil
+		}
+		m.resetProgress(len(tasks), copyop.TotalSize(tasks))
+		m.progressMode = modePhase1
 		m.screen = screenProgress
 		events := make(chan copyop.FileProgress, 64)
-		m.events = events
 		return m, tea.Batch(
 			copyPhase1Cmd(tasks, m.cfg.SSD, m.logger, m.cfg.SSDWorkerCount(), events),
 			drainProgressCmd(events, m.p),
@@ -635,37 +917,72 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 
 	case !r.SourceAvail && r.SSDAvail && r.NASAvail:
 		// Sync SSD→NAS only.
-		tasks := buildPhase2Tasks(r)
-		m.copyTotal = len(tasks)
-		m.copyDone = 0
+		missing := m.selectedIn(r.MissingOnNAS)
+		if len(m.selected) > 0 && len(missing) == 0 {
+			m.statusMsg = "No selected files need syncing to NAS."
+			return m, nil
+		}
+		tasks := make([]copyop.Task, 0, len(missing))
+		for _, f := range missing {
+			tasks = append(tasks, copyop.Task{Src: f, DstRelPath: f.RelPath})
+		}
+		sortVideosFirst(tasks, m.cfg)
+		if len(tasks) == 0 {
+			m.statusMsg = "NAS is already up to date."
+			return m, nil
+		}
+		if err := checkSpace(m.cfg.NAS, tasks); err != nil {
+			m.statusMsg = err.Error()
+			return m, nil
+		}
+		m.resetProgress(len(tasks), copyop.TotalSize(tasks))
 		m.progressMode = modeSync
 		m.screen = screenProgress
 		events := make(chan copyop.FileProgress, 64)
-		m.events = events
 		return m, tea.Batch(
 			syncCmd(tasks, m.cfg.NAS, m.logger, m.cfg.NASWorkerCount(), events),
 			drainProgressCmd(events, m.p),
 		)
 
 	default:
-		// Nothing to do.
+		m.statusMsg = "Nothing to do — no source device available."
 		return m, nil
 	}
 }
 
 // startPhase2 launches the SSD→NAS copy phase after user confirms.
 func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
+	if err := checkSpace(m.cfg.NAS, m.phase2Tasks); err != nil {
+		m.screen = screenDone
+		m.doneMsg = err.Error()
+		return m, nil
+	}
+	m.resetProgress(len(m.phase2Tasks), copyop.TotalSize(m.phase2Tasks))
+	m.failures = 0
+	m.failedFiles = nil
 	m.progressMode = modePhase2
 	m.screen = screenProgress
-	m.copyDone = 0
-	m.copyTotal = len(m.phase2Tasks)
-	m.fileProgress = map[string]copyop.FileProgress{}
 	events := make(chan copyop.FileProgress, 64)
-	m.events = events
 	return m, tea.Batch(
 		copyPhase2Cmd(m.phase2Tasks, m.cfg.NAS, m.logger, m.cfg.NASWorkerCount(), events),
 		drainProgressCmd(events, m.p),
 	)
+}
+
+// startVerify launches the verify pass with live per-file progress.
+func (m *Model) startVerify() (tea.Model, tea.Cmd) {
+	if m.status == nil || (!m.status.SourceAvail && !m.status.SSDAvail) {
+		m.statusMsg = "Nothing to verify — no camera or SSD available."
+		return m, nil
+	}
+	m.verifyDone = 0
+	m.verifyTotal = 0
+	m.verifyIssues = nil
+	m.failures = 0
+	m.failedFiles = nil
+	m.progressMode = modeVerify
+	m.screen = screenProgress
+	return m, verifyCmd(m.cfg, m.logger, m.p)
 }
 
 // gridCols computes the number of thumbnail columns that fit in the current width.
@@ -746,46 +1063,21 @@ func progressBar(width int, done, total int) string {
 	return styleProgressBar.Render(bar)
 }
 
+// relPathSet builds a lowercase relpath lookup set from scanned files.
+func relPathSet(files []scan.FileInfo) map[string]bool {
+	set := make(map[string]bool, len(files))
+	for _, f := range files {
+		set[strings.ToLower(f.RelPath)] = true
+	}
+	return set
+}
+
 func truncate(s string, w int) string {
-	if len(s) <= w {
+	runes := []rune(s)
+	if len(runes) <= w {
 		return s
 	}
-	return "…" + s[len(s)-w+1:]
-}
-
-func ssdNASStatus(f scan.FileInfo, r *status.StatusResult, cfg *config.Config) (onSSD, onNAS bool) {
-	if r == nil {
-		return false, false
-	}
-	cat := cfg.Category(f.RelPath)
-	key := strings.ToLower(f.DestRelPath(cat))
-
-	if r.SSDAvail {
-		for _, sf := range r.SSDFiles {
-			if strings.ToLower(sf.RelPath) == key {
-				onSSD = true
-				break
-			}
-		}
-	}
-	if r.NASAvail {
-		for _, nf := range r.NASFiles {
-			if strings.ToLower(nf.RelPath) == key {
-				onNAS = true
-				break
-			}
-		}
-	}
-	return
-}
-
-func freeBar(used, free int64) string {
-	total := used + free
-	if total == 0 {
-		return "N/A"
-	}
-	pct := int(100 * used / total)
-	return fmt.Sprintf("%d%%", pct)
+	return "…" + string(runes[len(runes)-w+1:])
 }
 
 func renderDevice(name string, avail bool, freeBytes int64) string {

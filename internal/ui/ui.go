@@ -45,46 +45,6 @@ func PrintDeviceTable(rows []DeviceRow) {
 	fmt.Println()
 }
 
-// FileStatusRow is one line in the file comparison table.
-type FileStatusRow struct {
-	RelPath    string
-	Size       int64
-	Category   string // "photos" or "videos"
-	OnSSD      bool
-	OnNAS      bool
-	NASApplies bool // false for photos (not copied to NAS)
-}
-
-func PrintFileTable(rows []FileStatusRow) {
-	if len(rows) == 0 {
-		fmt.Println("  (no camera files found)")
-		return
-	}
-	Bold.Println("  Files on Camera")
-	fmt.Printf("  %-45s  %7s  %8s  %5s  %5s\n", "Path", "Size", "Category", "SSD", "NAS")
-	fmt.Println("  " + strings.Repeat("─", 75))
-	for _, r := range rows {
-		ssd := Red.Sprint("  ✗  ")
-		if r.OnSSD {
-			ssd = Green.Sprint("  ✓  ")
-		}
-		var nas string
-		if !r.NASApplies {
-			nas = Dim.Sprint("  —  ")
-		} else if r.OnNAS {
-			nas = Green.Sprint("  ✓  ")
-		} else {
-			nas = Red.Sprint("  ✗  ")
-		}
-		name := r.RelPath
-		if utf8.RuneCountInString(name) > 45 {
-			name = "…" + name[len(name)-44:]
-		}
-		fmt.Printf("  %-45s  %7s  %8s  %s  %s\n", name, FormatBytes(r.Size), r.Category, ssd, nas)
-	}
-	fmt.Println()
-}
-
 // SpaceInfo holds how much needs to be copied and how much is free on a destination.
 type SpaceInfo struct {
 	Avail     bool

@@ -14,11 +14,13 @@ var (
 
 	styleTab = lipgloss.NewStyle().
 			Padding(0, 2).
-			Foreground(colorGray)
+			Foreground(colorGray).
+			Background(lipgloss.Color("#1f2937"))
 
 	styleActiveTab = lipgloss.NewStyle().
 			Padding(0, 2).
 			Foreground(colorWhite).
+			Background(colorBlue).
 			Bold(true)
 
 	styleTitle = lipgloss.NewStyle().

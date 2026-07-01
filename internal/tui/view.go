@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -24,7 +25,17 @@ func (m *Model) renderMain() string {
 	tabH := 1
 
 	// ── status bar at bottom ─────────────────────────────────────────────────
-	keyHints := styleStatusBar.Render("[tab] tabs  [j/k] move  [Enter] expand  [g] grid  [y] copy  [q] quit")
+	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [a] all  [g] grid  [y] copy  [v] verify  [q] quit"
+	if n := len(m.selected); n > 0 {
+		var selBytes int64
+		for _, f := range m.allFiles {
+			if m.selected[f.AbsPath] {
+				selBytes += f.Size
+			}
+		}
+		hints = fmt.Sprintf("%d selected · %s   %s", n, fmtBytes(selBytes), hints)
+	}
+	keyHints := styleStatusBar.Render(hints)
 	statusH := 1
 
 	// ── middle section ────────────────────────────────────────────────────────
@@ -187,9 +198,13 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 				nasIcon = " " + styleErr.Render("✗NAS")
 			}
 		}
+		mark := "  "
+		if m.selected[f.AbsPath] {
+			mark = styleWarn.Render("● ")
+		}
 		name := filepath.Base(f.RelPath)
-		label = fmt.Sprintf("%s  %-22s %8s  %s%s",
-			indent, truncate(name, 22), fmtBytes(f.Size), ssdIcon, nasIcon)
+		label = fmt.Sprintf("%s%s%-22s %8s  %s%s",
+			indent, mark, truncate(name, 22), fmtBytes(f.Size), ssdIcon, nasIcon)
 	}
 
 	s := lipgloss.NewStyle().Width(w)
@@ -203,21 +218,8 @@ func (m *Model) fileStatus(f scan.FileInfo) (onSSD, onNAS bool) {
 	if m.status == nil {
 		return
 	}
-	cat := m.cfg.Category(f.RelPath)
-	key := strings.ToLower(f.DestRelPath(cat))
-	for _, sf := range m.status.SSDFiles {
-		if strings.ToLower(sf.RelPath) == key {
-			onSSD = true
-			break
-		}
-	}
-	for _, nf := range m.status.NASFiles {
-		if strings.ToLower(nf.RelPath) == key {
-			onNAS = true
-			break
-		}
-	}
-	return
+	key := f.DestKey(m.cfg.Category(f.RelPath))
+	return m.ssdKeys[key], m.nasKeys[key]
 }
 
 func (m *Model) renderDetailPanel(w, h int) string {
@@ -360,7 +362,9 @@ func (m *Model) renderGrid() string {
 	return sb.String()
 }
 
-// renderPreview renders the full-screen preview screen (Kitty or block art fallback).
+// renderPreview renders the full-screen preview screen.
+// With Kitty graphics support the image area is left blank — the image itself
+// is drawn on top by kittyDrawCmd after the frame is flushed.
 func (m *Model) renderPreview() string {
 	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
 	if m.gridCursor >= len(files) {
@@ -369,21 +373,33 @@ func (m *Model) renderPreview() string {
 	f := files[m.gridCursor]
 	name := filepath.Base(f.RelPath)
 
+	previewH := m.height - 4
+	previewW := m.width - 4
+	if previewH < 1 {
+		previewH = 1
+	}
+	if previewW < 1 {
+		previewW = 1
+	}
+
+	// Best available image: full-size if loaded, else thumbnail.
+	img, haveFull := m.fullCache[f.AbsPath]
+	if !haveFull || img == nil {
+		if t, ok := m.thumbCache[f.AbsPath]; ok {
+			img = t
+		}
+	}
+
 	var content string
-	if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
-		// Full-screen block art; Kitty rendering is triggered as a side-effect command.
-		previewH := m.height - 4
-		previewW := m.width - 4
-		if previewH < 1 {
-			previewH = 1
-		}
-		if previewW < 1 {
-			previewW = 1
-		}
+	switch {
+	case m.kitty && img != nil:
+		// Reserve blank lines; the Kitty image is drawn over this area.
+		content = strings.Repeat("\n", previewH)
+	case img != nil:
 		content = preview.BlockArt(img, previewW, previewH)
-	} else if _, ok := m.thumbCache[f.AbsPath]; ok {
+	case haveFull:
 		content = styleDim.Render("\n\n  [no preview available]")
-	} else {
+	default:
 		content = styleDim.Render("\n\n  Loading…")
 	}
 
@@ -412,8 +428,12 @@ func (m *Model) renderProgress() string {
 	}
 	sb.WriteString(styleTitle.Render(title) + "\n\n")
 
-	// Per-file progress bars.
-	barW := m.width - 40
+	if m.progressMode == modeVerify {
+		return sb.String() + m.renderVerifyProgress()
+	}
+
+	// Per-file progress bars in stable first-seen order.
+	barW := m.width - 52
 	if barW < 10 {
 		barW = 10
 	}
@@ -422,34 +442,72 @@ func (m *Model) renderProgress() string {
 	if maxShown < 1 {
 		maxShown = 1
 	}
-	for _, fp := range m.fileProgress {
-		if fp.Done {
+	var bytesWritten int64
+	for _, rel := range m.progressOrder {
+		fp := m.fileProgress[rel]
+		bytesWritten += fp.Written
+		if fp.Done || shown >= maxShown {
 			continue
-		}
-		if shown >= maxShown {
-			break
 		}
 		pct := 0
 		if fp.Size > 0 {
 			pct = int(fp.Written * 100 / fp.Size)
 		}
+		speed := ""
+		if start, ok := m.fileStart[rel]; ok {
+			if elapsed := time.Since(start).Seconds(); elapsed > 0.2 {
+				speed = fmtBytes(int64(float64(fp.Written)/elapsed)) + "/s"
+			}
+		}
 		name := truncate(filepath.Base(fp.RelPath), 30)
 		bar := progressBar(barW, int(fp.Written), int(fp.Size))
-		line := fmt.Sprintf("  %-30s  %s  %3d%%\n", name, bar, pct)
-		sb.WriteString(line)
+		sb.WriteString(fmt.Sprintf("  %-30s  %s  %3d%%  %10s\n", name, bar, pct, speed))
 		shown++
 	}
 
-	// Overall progress.
+	// Overall progress by bytes, with file count.
 	sb.WriteString("\n")
-	overallBar := progressBar(m.width-20, m.copyDone, m.copyTotal)
-	sb.WriteString(fmt.Sprintf("  Overall: %s  %d / %d files\n",
-		overallBar, m.copyDone, m.copyTotal))
+	overallBar := progressBar(m.width-30, int(bytesWritten), int(m.copyBytes))
+	sb.WriteString(fmt.Sprintf("  Overall: %s  %d/%d files · %s / %s\n",
+		overallBar, m.copyDone, m.copyTotal,
+		fmtBytes(bytesWritten), fmtBytes(m.copyBytes)))
 
 	if m.failures > 0 {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("\n  %d file(s) failed so far.", m.failures)) + "\n")
 	}
 
+	return sb.String()
+}
+
+// renderVerifyProgress renders the live verify view: overall bar + issue list.
+func (m *Model) renderVerifyProgress() string {
+	var sb strings.Builder
+
+	if m.verifyTotal == 0 {
+		sb.WriteString(styleDim.Render("  Scanning files…") + "\n")
+		return sb.String()
+	}
+
+	bar := progressBar(m.width-30, m.verifyDone, m.verifyTotal)
+	sb.WriteString(fmt.Sprintf("  %s  %d / %d files\n\n", bar, m.verifyDone, m.verifyTotal))
+
+	if len(m.verifyIssues) == 0 {
+		sb.WriteString(styleOK.Render("  No issues found so far.") + "\n")
+		return sb.String()
+	}
+
+	maxShown := m.height - 10
+	if maxShown < 1 {
+		maxShown = 1
+	}
+	start := 0
+	if len(m.verifyIssues) > maxShown {
+		start = len(m.verifyIssues) - maxShown
+	}
+	for _, r := range m.verifyIssues[start:] {
+		sb.WriteString(styleWarn.Render(fmt.Sprintf("  ⚠ %s — %s",
+			filepath.Base(r.RelPath), strings.Join(r.Issues, ", "))) + "\n")
+	}
 	return sb.String()
 }
 
@@ -463,28 +521,34 @@ func (m *Model) renderDone() string {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("\n  %d file(s) had errors.", m.failures)) + "\n")
 		sb.WriteString("  " + styleWarn.Render("[e]") + " View error details\n")
 	}
+	if len(m.verifyIssues) > 0 {
+		sb.WriteString("  " + styleWarn.Render("[e]") + " View verify issues\n")
+	}
 
 	sb.WriteString("\n  " + styleOK.Render("[r]") + " Rescan and return to main screen\n")
 	sb.WriteString("  " + styleDim.Render("[q]") + " Quit\n")
 	return sb.String()
 }
 
-// renderErrors renders the error summary screen.
+// renderErrors renders the error summary screen (copy failures and verify issues).
 func (m *Model) renderErrors() string {
 	var sb strings.Builder
 	sb.WriteString(styleTitle.Render("  Error Summary") + "\n\n")
 
-	if len(m.failedFiles) == 0 {
+	if len(m.failedFiles) == 0 && len(m.verifyIssues) == 0 {
 		sb.WriteString(styleDim.Render("  No errors recorded.\n"))
-	} else {
-		for _, fp := range m.failedFiles {
-			name := truncate(filepath.Base(fp.RelPath), 40)
-			errMsg := ""
-			if fp.Err != nil {
-				errMsg = fp.Err.Error()
-			}
-			sb.WriteString(styleErr.Render(fmt.Sprintf("  %-40s  %s\n", name, errMsg)))
+	}
+	for _, fp := range m.failedFiles {
+		name := truncate(filepath.Base(fp.RelPath), 40)
+		errMsg := ""
+		if fp.Err != nil {
+			errMsg = fp.Err.Error()
 		}
+		sb.WriteString(styleErr.Render(fmt.Sprintf("  %-40s  %s\n", name, errMsg)))
+	}
+	for _, r := range m.verifyIssues {
+		name := truncate(filepath.Base(r.RelPath), 40)
+		sb.WriteString(styleWarn.Render(fmt.Sprintf("  %-40s  %s\n", name, strings.Join(r.Issues, ", "))))
 	}
 
 	sb.WriteString("\n  " + styleDim.Render("[Esc/q]") + " Back\n")
