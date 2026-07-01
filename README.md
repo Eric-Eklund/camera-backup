@@ -125,6 +125,21 @@ By default only failures are printed:
 
 Pass `--verbose` / `-v` to see every file.
 
+### `camera-backup tui`
+
+Interactive terminal UI wrapping all commands. Shows device availability, a
+year → month → day file tree with per-file SSD/NAS sync status, and runs
+copy/sync/verify with live parallel progress bars.
+
+- Tabs: **All** / **Missing on SSD** / **Missing on NAS** (`tab` to switch)
+- `j/k` or arrows navigate, `Enter` expands groups or previews a file
+- `space` selects files (or whole groups), `a` selects all — `y` then copies
+  only the selection (or everything when nothing is selected)
+- `g` opens a thumbnail grid for a date group, `v` runs verify, `q` quits
+- Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
+  full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
+- Devices are watched — plugging in the SD card refreshes the view automatically
+
 ---
 
 ## Configuration
@@ -139,6 +154,10 @@ nas    = "Y:\\CameraBackup"   # NAS mapped via SMB (or WireGuard VPN)
 file_extensions  = [".MOV", ".NEF", ".JPG", ".MP4"]
 video_extensions = [".MOV", ".MP4"]   # sorted into videos/ on destination
                                        # everything else goes into photos/
+
+# Parallel copy workers used by the TUI (optional)
+ssd_workers = 3               # camera → SSD (default 3)
+nas_workers = 1               # SSD → NAS   (default 1)
 ```
 
 Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all match.
@@ -147,19 +166,23 @@ Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all 
 
 ## Directory structure on destination
 
-Files are organised by category and shoot date (taken from the file's modification time). The DCIM folder structure from the camera is not preserved — filenames are kept flat under the date folder.
+Files are organised by category and shoot date (taken from the file's modification time) in a year → month → day hierarchy. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
 
 ```
 D:\CameraBackup\
   photos\
-    2026-03-24\
-      DSC_0001.NEF
-      DSC_0001.JPG
-      DSC_0002.NEF
+    2026\
+      2026-03\
+        2026-03-24\
+          DSC_0001.NEF
+          DSC_0001.JPG
+          DSC_0002.NEF
   videos\
-    2026-03-24\
-      VIDEO001.MOV
-      VIDEO002.MP4
+    2026\
+      2026-03\
+        2026-03-24\
+          VIDEO001.MOV
+          VIDEO002.MP4
 ```
 
 Both SSD and NAS use the same structure. The date folder prevents filename collisions across sessions (Nikon resets to `DSC_0001` when a new card is formatted).
@@ -225,12 +248,14 @@ camera-backup/
 ├── cmd/camera-backup/
 │   └── main.go              # Entry point, subcommands, space check
 ├── internal/
-│   ├── config/              # TOML loading, extension matching
+│   ├── config/              # TOML loading, extension matching, worker counts
 │   ├── scan/                # File scanning and comparison
 │   ├── checksum/            # SHA256 calculation
-│   ├── copyop/              # Copy with progress + verification
-│   ├── status/              # status command
-│   ├── verify/              # verify command
+│   ├── copyop/              # Copy with progress + verification (serial + parallel)
+│   ├── status/              # status command + Compute() for the TUI
+│   ├── verify/              # verify command + RunWithCallback() for the TUI
+│   ├── preview/             # Thumbnails (exiftool), block art, Kitty graphics
+│   ├── tui/                 # Interactive TUI (bubbletea)
 │   └── ui/                  # Terminal colours, progress bar, prompts
 ├── testdata/
 │   ├── config.toml          # Config pointing at testdata directories
@@ -250,6 +275,13 @@ camera-backup/
 | `github.com/BurntSushi/toml` | TOML config parsing |
 | `github.com/spf13/cobra` | CLI subcommands |
 | `github.com/fatih/color` | Terminal colours |
+| `github.com/charmbracelet/bubbletea` | TUI framework |
+| `github.com/charmbracelet/lipgloss` | TUI styling |
+| `github.com/fsnotify/fsnotify` | Device mount watching in the TUI |
+| `golang.org/x/image` | Thumbnail scaling |
+
+Optional runtime dependency: **exiftool** — used by the TUI to extract embedded
+previews from RAW (.NEF) files. Without it, RAW files show metadata only.
 
 ---
 
