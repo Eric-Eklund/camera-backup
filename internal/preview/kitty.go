@@ -8,9 +8,28 @@ import (
 	"image/png"
 	"io"
 	"os"
+	"strings"
 )
 
 const kittyChunkSize = 4096
+
+// Approximate pixel size of one terminal cell, used when rasterising for Kitty.
+const cellPxW, cellPxH = 9, 18
+
+// KittySupported reports whether the terminal likely speaks the Kitty
+// Graphics Protocol (Kitty itself, or Ghostty).
+func KittySupported() bool {
+	if os.Getenv("KITTY_WINDOW_ID") != "" || os.Getenv("GHOSTTY_RESOURCES_DIR") != "" {
+		return true
+	}
+	term := strings.ToLower(os.Getenv("TERM") + " " + os.Getenv("TERM_PROGRAM"))
+	return strings.Contains(term, "kitty") || strings.Contains(term, "ghostty")
+}
+
+// KittyClear deletes all images currently shown by the terminal.
+func KittyClear() {
+	fmt.Fprint(os.Stdout, "\033_Ga=d,d=A\033\\")
+}
 
 // KittyRender writes img to the terminal using the Kitty Graphics Protocol.
 // The image is scaled to fit within cols×rows cells and rendered at the current
@@ -19,14 +38,17 @@ func KittyRender(img image.Image, cols, rows int) error {
 	return kittyRenderTo(os.Stdout, img, cols, rows, -1, -1)
 }
 
-// KittyRenderAt renders img at a specific column/row offset within the terminal.
-// col and row are 0-indexed terminal cell coordinates.
-func KittyRenderAt(img image.Image, cols, rows, col, row int) error {
-	return kittyRenderTo(os.Stdout, img, cols, rows, col, row)
+// KittyRenderAtCell renders img sized cols×rows cells with its top-left corner
+// at the 1-indexed terminal cell (row, col). The cursor position is restored.
+func KittyRenderAtCell(img image.Image, cols, rows, row, col int) error {
+	fmt.Fprintf(os.Stdout, "\0337\033[%d;%dH", row, col) // save cursor, move
+	err := kittyRenderTo(os.Stdout, img, cols, rows, -1, -1)
+	fmt.Fprint(os.Stdout, "\0338") // restore cursor
+	return err
 }
 
 func kittyRenderTo(w io.Writer, img image.Image, cols, rows, col, row int) error {
-	scaled := scaleImage(img, cols*2, rows*4)
+	scaled := scaleImage(img, cols*cellPxW, rows*cellPxH)
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, scaled); err != nil {
