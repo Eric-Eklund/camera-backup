@@ -152,6 +152,37 @@ func TestMissingFromDest_Mixed(t *testing.T) {
 	}
 }
 
+func TestMissingFromDest_SkipWhenCollisionCopyExists(t *testing.T) {
+	// A previous run resolved the DSC_0003 name collision by saving the camera
+	// file as DSC_0003_1.NEF. Re-running must NOT copy it again as _2.
+	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	src := []scan.FileInfo{fi("DCIM/DSC_0003.NEF", 2048, modtime)}
+	dstIndex := map[string]scan.FileInfo{
+		"photos/2026/2026-03/2026-03-25/dsc_0003.nef":   fi("photos/2026/2026-03/2026-03-25/DSC_0003.NEF", 1024, modtime),
+		"photos/2026/2026-03/2026-03-25/dsc_0003_1.nef": fi("photos/2026/2026-03/2026-03-25/DSC_0003_1.NEF", 2048, modtime),
+	}
+
+	missing := scan.MissingFromDest(src, dstIndex, photoCat)
+	if len(missing) != 0 {
+		t.Errorf("len = %d, want 0 (collision copy _1 already has same size)", len(missing))
+	}
+}
+
+func TestMissingFromDest_IncludeWhenCollisionCopyDiffers(t *testing.T) {
+	// _1 exists but with yet another size — the source file is still missing.
+	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	src := []scan.FileInfo{fi("DCIM/DSC_0003.NEF", 4096, modtime)}
+	dstIndex := map[string]scan.FileInfo{
+		"photos/2026/2026-03/2026-03-25/dsc_0003.nef":   fi("photos/2026/2026-03/2026-03-25/DSC_0003.NEF", 1024, modtime),
+		"photos/2026/2026-03/2026-03-25/dsc_0003_1.nef": fi("photos/2026/2026-03/2026-03-25/DSC_0003_1.NEF", 2048, modtime),
+	}
+
+	missing := scan.MissingFromDest(src, dstIndex, photoCat)
+	if len(missing) != 1 {
+		t.Errorf("len = %d, want 1 (no collision copy matches the size)", len(missing))
+	}
+}
+
 // ── MissingByRelPath ──────────────────────────────────────────────────────────
 
 func TestMissingByRelPath_NewFile(t *testing.T) {

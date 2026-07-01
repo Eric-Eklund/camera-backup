@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"fmt"
 	"io/fs"
 	"path"
 	"path/filepath"
@@ -106,16 +107,42 @@ func IndexByKey(files []FileInfo) map[string]FileInfo {
 // MissingFromDest returns camera files not yet on the destination.
 // categoryFn maps a FileInfo to "photos" or "videos".
 // dstIndex must be keyed by lowercased RelPath (category/date/filename).
+//
+// A name collision (same name, different size) is resolved at copy time by
+// saving the file with a _N suffix. On later runs the original key still
+// mismatches by size, so the _N variants are probed too — otherwise the same
+// file would be copied again on every run, creating _2, _3, … forever.
 func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo, categoryFn func(FileInfo) string) []FileInfo {
 	var out []FileInfo
 	for _, f := range src {
 		key := f.DestKey(categoryFn(f))
 		existing, found := dstIndex[key]
-		if !found || existing.Size != f.Size {
-			out = append(out, f)
+		if found && existing.Size == f.Size {
+			continue
 		}
+		if found && collisionCopyExists(key, f.Size, dstIndex) {
+			continue
+		}
+		out = append(out, f)
 	}
 	return out
+}
+
+// collisionCopyExists reports whether a _N collision variant of key exists in
+// dstIndex with the wanted size. Variants are allocated contiguously by
+// safeCreate, so probing stops at the first missing suffix.
+func collisionCopyExists(key string, size int64, dstIndex map[string]FileInfo) bool {
+	ext := filepath.Ext(key)
+	stem := strings.TrimSuffix(key, ext)
+	for i := 1; ; i++ {
+		variant, found := dstIndex[fmt.Sprintf("%s_%d%s", stem, i, ext)]
+		if !found {
+			return false
+		}
+		if variant.Size == size {
+			return true
+		}
+	}
 }
 
 // MissingByRelPath returns files from src absent in dstIndex (keyed by lowercased RelPath).
