@@ -20,6 +20,15 @@ type fileResult struct {
 	nasHash    string
 }
 
+// FileResult is the public result for a single verified file, used by RunWithCallback.
+type FileResult struct {
+	RelPath string
+	Issues  []string
+}
+
+// ProgressFn is called by RunWithCallback after each file is verified.
+type ProgressFn func(done, total int, r FileResult)
+
 // Run executes the verify command.
 // If verbose is true every file is printed; otherwise only failures are shown.
 func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
@@ -138,6 +147,99 @@ func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
 		ui.Green.Printf("  All %d files verified OK.\n\n", len(results))
 	} else {
 		ui.Yellow.Printf("  %d / %d files have issues.\n\n", badCount, len(results))
+	}
+	return nil
+}
+
+// RunWithCallback verifies all files without printing per-file progress to stdout.
+// fn is called after each file completes; fn may be nil.
+func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) error {
+	exts := cfg.NormalisedExtensions()
+
+	sourceAvail := isDir(cfg.Source)
+	ssdAvail := isDir(cfg.SSD)
+	nasAvail := cfg.NAS != "" && isDir(cfg.NAS)
+
+	if !sourceAvail && !ssdAvail {
+		return fmt.Errorf("neither camera nor SSD is available — nothing to verify")
+	}
+
+	var authorityFiles []scan.FileInfo
+	var err error
+	if sourceAvail {
+		authorityFiles, err = scan.Walk(cfg.Source, exts)
+	} else {
+		authorityFiles, err = scan.Walk(cfg.SSD, exts)
+	}
+	if err != nil {
+		return err
+	}
+
+	ssdIndex := map[string]scan.FileInfo{}
+	if ssdAvail {
+		ssdFiles, _ := scan.Walk(cfg.SSD, exts)
+		ssdIndex = scan.IndexByRelPath(ssdFiles)
+	}
+	nasIndex := map[string]scan.FileInfo{}
+	if nasAvail {
+		nasFiles, _ := scan.Walk(cfg.NAS, exts)
+		nasIndex = scan.IndexByRelPath(nasFiles)
+	}
+
+	total := len(authorityFiles)
+	for i, f := range authorityFiles {
+		cat := cfg.Category(f.RelPath)
+		res := FileResult{RelPath: f.RelPath}
+
+		var cameraHash, ssdHash, nasHash string
+
+		if sourceAvail {
+			cameraHash, err = checksum.File(f.AbsPath)
+			if err != nil {
+				res.Issues = append(res.Issues, fmt.Sprintf("camera read error: %v", err))
+				logger.Printf("ERROR camera hash %s: %v", f.RelPath, err)
+			}
+		}
+		if ssdAvail {
+			if ssd, ok := ssdIndex[f.DestKey(cat)]; ok {
+				ssdHash, err = checksum.File(ssd.AbsPath)
+				if err != nil {
+					res.Issues = append(res.Issues, fmt.Sprintf("SSD read error: %v", err))
+					logger.Printf("ERROR ssd hash %s: %v", f.RelPath, err)
+				}
+			} else {
+				res.Issues = append(res.Issues, "missing from SSD")
+			}
+		}
+		if nasAvail {
+			if nas, ok := nasIndex[f.DestKey(cat)]; ok {
+				nasHash, err = checksum.File(nas.AbsPath)
+				if err != nil {
+					res.Issues = append(res.Issues, fmt.Sprintf("NAS read error: %v", err))
+					logger.Printf("ERROR nas hash %s: %v", f.RelPath, err)
+				}
+			} else {
+				res.Issues = append(res.Issues, "missing from NAS")
+			}
+		}
+
+		if cameraHash != "" && ssdHash != "" && cameraHash != ssdHash {
+			res.Issues = append(res.Issues, "SSD hash mismatch")
+		}
+		if cameraHash != "" && nasHash != "" && cameraHash != nasHash {
+			res.Issues = append(res.Issues, "NAS hash mismatch")
+		}
+		if ssdHash != "" && nasHash != "" && ssdHash != nasHash {
+			res.Issues = append(res.Issues, "SSD/NAS hash mismatch")
+		}
+
+		ok := len(res.Issues) == 0
+		logger.Printf("VERIFY %s camera=%s ssd=%s nas=%s ok=%v issues=%v",
+			f.RelPath, short(cameraHash), short(ssdHash), short(nasHash), ok, res.Issues)
+
+		if fn != nil {
+			fn(i+1, total, res)
+		}
 	}
 	return nil
 }

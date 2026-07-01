@@ -26,15 +26,17 @@ func (f FileInfo) Key() string {
 }
 
 // DestRelPath returns the expected relative path on a destination root.
-// category is "photos" or "videos". The structure is always flat:
+// category is "photos" or "videos". Structure is year/year-month/year-month-day:
 //
-//	"photos/2026-03-24/DSC_0001.NEF"
-//	"videos/2026-03-24/VIDEO001.MOV"
+//	"photos/2026/2026-03/2026-03-24/DSC_0001.NEF"
+//	"videos/2026/2026-03/2026-03-24/VIDEO001.MOV"
 //
 // Always uses forward slashes so keys are consistent across platforms.
 func (f FileInfo) DestRelPath(category string) string {
-	date := f.ModTime.Format("2006-01-02")
-	return path.Join(category, date, filepath.Base(f.RelPath))
+	year  := f.ModTime.Format("2006")
+	month := f.ModTime.Format("2006-01")
+	day   := f.ModTime.Format("2006-01-02")
+	return path.Join(category, year, month, day, filepath.Base(f.RelPath))
 }
 
 // DestKey returns a lowercased DestRelPath for map lookups.

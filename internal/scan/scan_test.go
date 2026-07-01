@@ -76,7 +76,7 @@ func TestDestRelPath(t *testing.T) {
 		ModTime: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC),
 	}
 	got := f.DestRelPath("photos")
-	want := "photos/2026-03-25/DSC_0001.NEF"
+	want := "photos/2026/2026-03/2026-03-25/DSC_0001.NEF"
 	if got != want {
 		t.Errorf("DestRelPath = %q, want %q", got, want)
 	}
@@ -112,7 +112,7 @@ func TestMissingFromDest_SkipSameSize(t *testing.T) {
 	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	src := []scan.FileInfo{fi("DCIM/DSC_0001.NEF", 1024, modtime)}
 	dstIndex := map[string]scan.FileInfo{
-		"photos/2026-03-25/dsc_0001.nef": fi("photos/2026-03-25/DSC_0001.NEF", 1024, modtime),
+		"photos/2026/2026-03/2026-03-25/dsc_0001.nef": fi("photos/2026/2026-03/2026-03-25/DSC_0001.NEF", 1024, modtime),
 	}
 
 	missing := scan.MissingFromDest(src, dstIndex, photoCat)
@@ -125,7 +125,7 @@ func TestMissingFromDest_IncludeDifferentSize(t *testing.T) {
 	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	src := []scan.FileInfo{fi("DCIM/DSC_0001.NEF", 2048, modtime)}
 	dstIndex := map[string]scan.FileInfo{
-		"photos/2026-03-25/dsc_0001.nef": fi("photos/2026-03-25/DSC_0001.NEF", 1024, modtime),
+		"photos/2026/2026-03/2026-03-25/dsc_0001.nef": fi("photos/2026/2026-03/2026-03-25/DSC_0001.NEF", 1024, modtime),
 	}
 
 	missing := scan.MissingFromDest(src, dstIndex, photoCat)
@@ -142,8 +142,8 @@ func TestMissingFromDest_Mixed(t *testing.T) {
 		fi("DCIM/DSC_0003.NEF", 2048, modtime), // different size → include
 	}
 	dstIndex := map[string]scan.FileInfo{
-		"photos/2026-03-25/dsc_0002.nef": fi("photos/2026-03-25/DSC_0002.NEF", 512, modtime),
-		"photos/2026-03-25/dsc_0003.nef": fi("photos/2026-03-25/DSC_0003.NEF", 1024, modtime),
+		"photos/2026/2026-03/2026-03-25/dsc_0002.nef": fi("photos/2026/2026-03/2026-03-25/DSC_0002.NEF", 512, modtime),
+		"photos/2026/2026-03/2026-03-25/dsc_0003.nef": fi("photos/2026/2026-03/2026-03-25/DSC_0003.NEF", 1024, modtime),
 	}
 
 	missing := scan.MissingFromDest(src, dstIndex, photoCat)

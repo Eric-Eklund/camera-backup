@@ -15,6 +15,22 @@ type Config struct {
 	NAS             string   `toml:"nas"`
 	FileExtensions  []string `toml:"file_extensions"`
 	VideoExtensions []string `toml:"video_extensions"`
+	SSDWorkers      int      `toml:"ssd_workers"`
+	NASWorkers      int      `toml:"nas_workers"`
+}
+
+func (c *Config) SSDWorkerCount() int {
+	if c.SSDWorkers > 0 {
+		return c.SSDWorkers
+	}
+	return 3
+}
+
+func (c *Config) NASWorkerCount() int {
+	if c.NASWorkers > 0 {
+		return c.NASWorkers
+	}
+	return 1
 }
 
 // NormalisedExtensions returns all file_extensions lowercased.

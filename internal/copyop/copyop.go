@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Eric-Eklund/camera-backup/internal/checksum"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
@@ -167,6 +168,123 @@ func TotalSize(tasks []Task) int64 {
 		n += t.Src.Size
 	}
 	return n
+}
+
+// FileProgress is a progress snapshot sent by RunBatchParallel for each active file.
+type FileProgress struct {
+	RelPath string
+	Written int64
+	Size    int64
+	Done    bool
+	Err     error
+}
+
+// progressWriter is an io.Writer that sends FileProgress events to a channel.
+type progressWriter struct {
+	relPath string
+	size    int64
+	written int64
+	events  chan<- FileProgress
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	pw.written += int64(n)
+	pw.events <- FileProgress{RelPath: pw.relPath, Written: pw.written, Size: pw.size}
+	return n, nil
+}
+
+// copyWithWriter copies a single task to dstRoot, writing progress bytes to w.
+// If doVerify is true the destination is SHA256-checked against the source.
+// On failure the partial destination file is removed.
+func copyWithWriter(t Task, dstRoot string, doVerify bool, logger *log.Logger, w io.Writer) error {
+	intendedPath := filepath.Join(dstRoot, t.DstRelPath)
+	if err := os.MkdirAll(filepath.Dir(intendedPath), 0755); err != nil {
+		return fmt.Errorf("mkdir %q: %w", filepath.Dir(intendedPath), err)
+	}
+	src, err := os.OpenFile(t.Src.AbsPath, os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open source %q: %w", t.Src.AbsPath, err)
+	}
+	defer src.Close()
+
+	dst, dstPath, err := safeCreate(intendedPath)
+	if err != nil {
+		return fmt.Errorf("create dest %q: %w", intendedPath, err)
+	}
+	defer dst.Close()
+
+	buf := make([]byte, copyBufSize)
+	if _, err := io.CopyBuffer(io.MultiWriter(dst, w), src, buf); err != nil {
+		os.Remove(dstPath)
+		return fmt.Errorf("copying %q: %w", t.Src.RelPath, err)
+	}
+
+	if doVerify {
+		if err := dst.Sync(); err != nil {
+			os.Remove(dstPath)
+			return fmt.Errorf("sync %q: %w", dstPath, err)
+		}
+		srcHash, err := checksum.File(t.Src.AbsPath)
+		if err != nil {
+			os.Remove(dstPath)
+			return fmt.Errorf("checksum source %q: %w", t.Src.RelPath, err)
+		}
+		dstHash, err := checksum.File(dstPath)
+		if err != nil {
+			os.Remove(dstPath)
+			return fmt.Errorf("checksum dest %q: %w", t.DstRelPath, err)
+		}
+		if srcHash != dstHash {
+			os.Remove(dstPath)
+			return fmt.Errorf("checksum mismatch %q: src=%s… dst=%s…", t.Src.RelPath, srcHash[:8], dstHash[:8])
+		}
+		logger.Printf("COPY OK (verified)  %-50s  sha256=%s", dstPath, dstHash)
+	} else {
+		logger.Printf("COPY OK  %s", dstPath)
+	}
+
+	_ = os.Chtimes(dstPath, t.Src.ModTime, t.Src.ModTime)
+
+	if dstPath != intendedPath {
+		savedRel, _ := filepath.Rel(dstRoot, dstPath)
+		logger.Printf("COLLISION  original=%s  saved=%s", t.DstRelPath, savedRel)
+	}
+	return nil
+}
+
+// RunBatchParallel runs up to workers concurrent copies, sending FileProgress
+// snapshots to events as each chunk completes. Closes events when all tasks finish.
+// Returns the number of files that failed.
+func RunBatchParallel(tasks []Task, dstRoot string, logger *log.Logger, doVerify bool, workers int, events chan<- FileProgress) int {
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	errCount := 0
+
+	for _, t := range tasks {
+		t := t
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			pw := &progressWriter{relPath: t.DstRelPath, size: t.Src.Size, events: events}
+			err := copyWithWriter(t, dstRoot, doVerify, logger, pw)
+			events <- FileProgress{RelPath: t.DstRelPath, Written: t.Src.Size, Size: t.Src.Size, Done: true, Err: err}
+			if err != nil {
+				logger.Printf("ERROR  %v", err)
+				mu.Lock()
+				errCount++
+				mu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(events)
+	return errCount
 }
 
 // RunBatch copies a slice of tasks to dstRoot using CopyAndVerify if verify is true,
