@@ -31,6 +31,7 @@ const (
 	screenConfirm         // between phase 1 done and phase 2 start
 	screenDone            // completed
 	screenErrors          // error summary
+	screenHelp            // keybinding reference
 )
 
 type progressMode int
@@ -93,6 +94,7 @@ type Model struct {
 	loadingFull  map[string]bool        // absPath → full image load in flight
 	kitty        bool                   // terminal supports Kitty Graphics Protocol
 	prevScreen   Screen
+	helpReturn   Screen                 // screen to return to when help closes
 	gridYear     string
 	gridMonth    string
 	gridDay      string
@@ -415,6 +417,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		}
+
+	case screenHelp:
+		switch msg.String() {
+		case "esc", "q", "?":
+			m.screen = m.helpReturn
+		case "ctrl+c":
+			return m, tea.Quit
+		}
 	}
 	return m, nil
 }
@@ -492,6 +502,10 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case " ":
 		m.toggleSelect()
+
+	case "?":
+		m.helpReturn = screenMain
+		m.screen = screenHelp
 	}
 	return m, nil
 }
@@ -603,6 +617,9 @@ func (m *Model) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y", "Y":
 		// Copy directly from the grid; selection (if any) applies as usual.
 		return m.startCopy()
+	case "?":
+		m.helpReturn = screenGrid
+		m.screen = screenHelp
 	case " ":
 		if m.gridCursor < len(files) {
 			f := files[m.gridCursor]
@@ -925,17 +942,32 @@ func (m *Model) dayFiles(year, month, day string) []scan.FileInfo {
 	return nil
 }
 
-// maybeLoadThumb fires thumbnailCmd for the focused file if not already cached/loading.
+// maybeLoadThumb fires thumbnail loads for the focused node: the file itself
+// on a file row, or the first few files of a date group so the Info panel's
+// mini-grid can render.
 func (m *Model) maybeLoadThumb() tea.Cmd {
 	if len(m.visible) == 0 || m.cursor >= len(m.visible) {
 		return nil
 	}
 	node := m.visible[m.cursor]
-	if node.level != 3 {
-		return nil
+	switch node.level {
+	case 3:
+		f := m.tree[node.year][node.month][node.day][node.fileIdx]
+		return m.loadThumb(f.AbsPath)
+	case 2:
+		const maxLoads = 9 // generous upper bound for the mini-grid
+		var cmds []tea.Cmd
+		for i, f := range m.dayFiles(node.year, node.month, node.day) {
+			if i >= maxLoads {
+				break
+			}
+			if cmd := m.loadThumb(f.AbsPath); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return tea.Batch(cmds...)
 	}
-	f := m.tree[node.year][node.month][node.day][node.fileIdx]
-	return m.loadThumb(f.AbsPath)
+	return nil
 }
 
 // resetProgress clears all per-batch progress state.
@@ -1122,6 +1154,8 @@ func (m *Model) View() string {
 		return m.renderDone()
 	case screenErrors:
 		return m.renderErrors()
+	case screenHelp:
+		return m.renderHelp()
 	}
 	return ""
 }

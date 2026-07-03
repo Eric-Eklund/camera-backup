@@ -79,7 +79,14 @@ func (m *Model) renderMain() string {
 	}
 	treeW := m.width - detW
 
-	mid := panel("Files", m.renderTreePanel(treeW-2, midH-2), treeW, midH)
+	// Show the visible range in the panel title when the tree overflows.
+	treeTitle := "Files"
+	if total := len(m.visible); total > midH-2 {
+		start, end := m.treeWindow(midH - 2)
+		treeTitle = fmt.Sprintf("Files %d–%d/%d", start+1, end, total)
+	}
+
+	mid := panel(treeTitle, m.renderTreePanel(treeW-2, midH-2), treeW, midH)
 	if detW > 0 {
 		detPanel := panel("Info", m.renderDetailPanel(detW-2, midH-2), detW, midH)
 		mid = lipgloss.JoinHorizontal(lipgloss.Top, mid, detPanel)
@@ -123,7 +130,7 @@ func deviceBadge(name string, avail bool, free int64) string {
 }
 
 func (m *Model) renderStatusBar() string {
-	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [a] all  [g] grid  [y] copy  [v] verify  [q] quit"
+	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [g] grid  [y] copy  [v] verify  [?] help  [q] quit"
 	if n := len(m.selected); n > 0 {
 		var selBytes int64
 		for _, f := range m.allFiles {
@@ -152,42 +159,38 @@ func (m *Model) renderTabBar() string {
 	return strings.Join(parts, "  ")
 }
 
-func (m *Model) renderTreePanel(w, h int) string {
-	if w <= 0 {
-		return ""
-	}
-	var lines []string
-
-	for i, node := range m.visible {
-		focused := i == m.cursor
-		line := m.renderNode(node, w, focused)
-		lines = append(lines, line)
-	}
-
-	if len(lines) == 0 {
-		empty := styleDim.Render("  (no files)")
-		lines = append(lines, empty)
-	}
-
-	// Show a window of h lines around the cursor.
-	start := 0
+// treeWindow returns the [start, end) range of visible tree rows shown in a
+// panel of inner height h, keeping the cursor centred when the tree overflows.
+func (m *Model) treeWindow(h int) (start, end int) {
+	total := len(m.visible)
 	if m.cursor >= h {
 		start = m.cursor - h/2
 	}
-	if start+h > len(lines) {
-		start = len(lines) - h
+	if start+h > total {
+		start = total - h
 	}
 	if start < 0 {
 		start = 0
 	}
-	end := start + h
-	if end > len(lines) {
-		end = len(lines)
+	end = start + h
+	if end > total {
+		end = total
+	}
+	return start, end
+}
+
+func (m *Model) renderTreePanel(w, h int) string {
+	if w <= 0 {
+		return ""
+	}
+	if len(m.visible) == 0 {
+		return styleDim.Render("  (no files)")
 	}
 
-	window := lines[start:end]
-	for len(window) < h {
-		window = append(window, lipgloss.NewStyle().Width(w).Render(""))
+	start, end := m.treeWindow(h)
+	window := make([]string, 0, h)
+	for i := start; i < end; i++ {
+		window = append(window, m.renderNode(m.visible[i], w, i == m.cursor))
 	}
 	return strings.Join(window, "\n")
 }
@@ -353,24 +356,33 @@ func (m *Model) renderDayDetail(node treeNode, w, h int) []string {
 	add(fmt.Sprintf("  %d files · %s", len(files), fmtBytes(totalSize)))
 	add("")
 
-	// Mini-grid: first 6 thumbnails as block art.
-	maxPrev := 6
-	if len(files) < maxPrev {
+	// Mini-grid of thumbnails, laid out in columns and limited to the rows
+	// that actually fit in the remaining panel height.
+	const cols, thumbH = 3, 4
+	thumbW := (w - 2) / cols
+	if thumbW < 4 {
+		return lines
+	}
+	maxPrev := (h - len(lines)) / thumbH * cols
+	if maxPrev > len(files) {
 		maxPrev = len(files)
 	}
-	thumbW := (w - 2) / 3
-	if thumbW < 4 {
-		thumbW = 4
-	}
-	thumbH := 4
-	for i := 0; i < maxPrev; i++ {
-		f := files[i]
-		if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
-			art := preview.BlockArt(img, thumbW, thumbH)
-			for _, al := range strings.Split(strings.TrimRight(art, "\n"), "\n") {
-				lines = append(lines, al)
+	for i := 0; i < maxPrev; i += cols {
+		rowEnd := i + cols
+		if rowEnd > maxPrev {
+			rowEnd = maxPrev
+		}
+		cells := make([]string, 0, cols)
+		for _, f := range files[i:rowEnd] {
+			if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
+				cells = append(cells, strings.TrimRight(preview.BlockArt(img, thumbW, thumbH), "\n"))
+			} else {
+				cells = append(cells, strings.TrimRight(
+					strings.Repeat(styleDim.Render(strings.Repeat("░", thumbW))+"\n", thumbH), "\n"))
 			}
 		}
+		row := lipgloss.JoinHorizontal(lipgloss.Top, cells...)
+		lines = append(lines, strings.Split(row, "\n")...)
 	}
 
 	return lines
@@ -612,6 +624,56 @@ func (m *Model) renderVerifyProgress() string {
 			filepath.Base(r.RelPath), strings.Join(r.Issues, ", "))) + "\n")
 	}
 	return sb.String()
+}
+
+// renderHelp renders the keybinding reference screen.
+func (m *Model) renderHelp() string {
+	type binding struct{ keys, desc string }
+	type section struct {
+		title    string
+		bindings []binding
+	}
+	sections := []section{
+		{"Navigation", []binding{
+			{"j/k or ↑/↓", "move cursor"},
+			{"enter", "expand/collapse group · preview file"},
+			{"tab / shift+tab", "next / previous tab"},
+			{"g", "thumbnail grid for the focused date"},
+		}},
+		{"Selection", []binding{
+			{"space", "select/deselect file or group"},
+			{"a", "select/deselect everything in the tab"},
+		}},
+		{"Actions", []binding{
+			{"y", "copy — selected files, or everything missing"},
+			{"v", "verify checksums (camera vs SSD vs NAS)"},
+		}},
+		{"Grid & preview", []binding{
+			{"←→↑↓ / hjkl", "navigate thumbnails"},
+			{"enter/p", "full-size preview"},
+			{"space · y", "select · copy from the grid"},
+			{"esc", "back"},
+		}},
+		{"While copying", []binding{
+			{"q/esc", "cancel — files in progress finish, the queue stops"},
+			{"ctrl+c", "force quit"},
+		}},
+		{"General", []binding{
+			{"?", "toggle this help"},
+			{"q", "quit (from the main screen)"},
+			{"ctrl+c", "quit from anywhere"},
+		}},
+	}
+
+	var sb strings.Builder
+	for _, sec := range sections {
+		sb.WriteString("\n  " + styleHeader.Render(sec.title) + "\n")
+		for _, b := range sec.bindings {
+			sb.WriteString(fmt.Sprintf("    %s  %s\n",
+				styleOK.Render(fmt.Sprintf("%-16s", b.keys)), styleDim.Render(b.desc)))
+		}
+	}
+	return m.screenFrame("Help", sb.String(), "[Esc/q/?] back")
 }
 
 // renderDone renders the completion screen.
