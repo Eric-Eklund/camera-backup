@@ -7,24 +7,122 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Eric-Eklund/camera-backup/internal/preview"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 )
 
-// renderMain renders the three-panel main screen.
+// panel renders content inside a rounded border with the title embedded in
+// the top edge, Yazi-style: ╭─ Title ─────╮. w and h are outer dimensions;
+// content is clipped and padded to the inner (w-2)×(h-2) area.
+func panel(title, content string, w, h int) string {
+	innerW := w - 2
+	innerH := h - 2
+	if innerW < 1 || innerH < 0 {
+		return ""
+	}
+
+	t := ""
+	if title != "" && lipgloss.Width(title)+4 <= innerW {
+		t = " " + title + " "
+	}
+	fill := innerW - 1 - lipgloss.Width(t)
+	top := stylePanelBorder.Render("╭─") +
+		stylePanelTitle.Render(t) +
+		stylePanelBorder.Render(strings.Repeat("─", fill)+"╮")
+
+	side := stylePanelBorder.Render("│")
+	lines := strings.Split(content, "\n")
+
+	var sb strings.Builder
+	sb.WriteString(top + "\n")
+	for i := 0; i < innerH; i++ {
+		line := ""
+		if i < len(lines) {
+			line = ansi.Truncate(lines[i], innerW, "")
+		}
+		if pad := innerW - lipgloss.Width(line); pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		sb.WriteString(side + line + side + "\n")
+	}
+	sb.WriteString(stylePanelBorder.Render("╰" + strings.Repeat("─", innerW) + "╯"))
+	return sb.String()
+}
+
+// screenFrame wraps a full-screen body in a titled border with a hint line
+// below the frame, so every screen shares the same look.
+func (m *Model) screenFrame(title, body, hint string) string {
+	if m.width == 0 || m.height == 0 {
+		return body
+	}
+	frame := panel(title, body, m.width, m.height-1)
+	return frame + "\n" + lipgloss.NewStyle().MaxWidth(m.width).Render(styleStatusBar.Render(hint))
+}
+
+// renderMain renders the main screen: header row (tabs + devices), the Files
+// and Info panels, and a status bar.
 func (m *Model) renderMain() string {
 	if m.width == 0 || m.height == 0 {
 		return m.statusMsg
 	}
 
-	totalH := m.height
+	midH := m.height - 2 // header + status bar
+	if midH < 4 {
+		midH = 4
+	}
 
-	// ── tab bar ──────────────────────────────────────────────────────────────
-	tabBar := m.renderTabBar()
-	tabH := 1
+	detW := 34
+	if m.width < 70 {
+		detW = 0
+	}
+	treeW := m.width - detW
 
-	// ── status bar at bottom ─────────────────────────────────────────────────
+	mid := panel("Files", m.renderTreePanel(treeW-2, midH-2), treeW, midH)
+	if detW > 0 {
+		detPanel := panel("Info", m.renderDetailPanel(detW-2, midH-2), detW, midH)
+		mid = lipgloss.JoinHorizontal(lipgloss.Top, mid, detPanel)
+	}
+
+	return m.renderHeaderRow() + "\n" + mid + "\n" + m.renderStatusBar()
+}
+
+// renderHeaderRow lays out the tab bar on the left and device status on the right.
+func (m *Model) renderHeaderRow() string {
+	tabs := m.renderTabBar()
+	dev := m.renderDeviceHeader()
+	gap := m.width - lipgloss.Width(tabs) - lipgloss.Width(dev)
+	if gap < 1 {
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(tabs)
+	}
+	return tabs + strings.Repeat(" ", gap) + dev
+}
+
+// renderDeviceHeader renders the compact device status: ✔ Camera · ✔ SSD 412 GB · ✘ NAS
+func (m *Model) renderDeviceHeader() string {
+	if m.status == nil {
+		return ""
+	}
+	r := m.status
+	sep := styleDim.Render(" · ")
+	return deviceBadge("Camera", r.SourceAvail, r.SourceFree) + sep +
+		deviceBadge("SSD", r.SSDAvail, r.SSDFree) + sep +
+		deviceBadge("NAS", r.NASAvail, r.NASFree) + " "
+}
+
+func deviceBadge(name string, avail bool, free int64) string {
+	if !avail {
+		return styleDim.Render("✘ " + name)
+	}
+	s := styleOK.Render("✔ " + name)
+	if free > 0 {
+		s += styleDim.Render(" " + fmtBytes(free))
+	}
+	return s
+}
+
+func (m *Model) renderStatusBar() string {
 	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [a] all  [g] grid  [y] copy  [v] verify  [q] quit"
 	if n := len(m.selected); n > 0 {
 		var selBytes int64
@@ -35,37 +133,11 @@ func (m *Model) renderMain() string {
 		}
 		hints = fmt.Sprintf("%d selected · %s   %s", n, fmtBytes(selBytes), hints)
 	}
-	keyHints := styleStatusBar.Render(hints)
-	statusH := 1
-
-	// ── middle section ────────────────────────────────────────────────────────
-	midH := totalH - tabH - statusH - 1 // -1 for newlines
-	if midH < 4 {
-		midH = 4
-	}
-
-	// Panel widths.
-	devW := 22
-	detW := 30
-	if m.width < devW+detW+20 {
-		devW = 0
-		detW = 0
-	}
-	treeW := m.width - devW - detW
-
-	devPanel := m.renderDevicePanel(devW, midH)
-	treePanel := m.renderTreePanel(treeW, midH)
-	detPanel := m.renderDetailPanel(detW, midH)
-
-	mid := lipgloss.JoinHorizontal(lipgloss.Top, devPanel, treePanel, detPanel)
-
-	// ── status bar ───────────────────────────────────────────────────────────
-	scanMsg := ""
+	bar := styleStatusBar.Render(hints)
 	if m.statusMsg != "" {
-		scanMsg = styleWarn.Render("  "+m.statusMsg) + "  "
+		bar = styleWarn.Render(" "+m.statusMsg) + "  " + bar
 	}
-
-	return tabBar + "\n" + mid + "\n" + scanMsg + keyHints
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(bar)
 }
 
 func (m *Model) renderTabBar() string {
@@ -78,33 +150,6 @@ func (m *Model) renderTabBar() string {
 		}
 	}
 	return strings.Join(parts, "  ")
-}
-
-func (m *Model) renderDevicePanel(w, h int) string {
-	if w == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString(styleHeader.Render("Devices") + "\n")
-
-	if m.status != nil {
-		r := m.status
-		sb.WriteString(renderDevice("Camera", r.SourceAvail, r.SourceFree) + "\n")
-		sb.WriteString(renderDevice("SSD   ", r.SSDAvail, r.SSDFree) + "\n")
-		sb.WriteString(renderDevice("NAS   ", r.NASAvail, r.NASFree) + "\n")
-	}
-
-	lines := strings.Split(sb.String(), "\n")
-	for len(lines) < h {
-		lines = append(lines, "")
-	}
-	lines = lines[:h]
-
-	// Pad each line to width.
-	for i, l := range lines {
-		lines[i] = lipgloss.NewStyle().Width(w).Render(l)
-	}
-	return strings.Join(lines, "\n")
 }
 
 func (m *Model) renderTreePanel(w, h int) string {
@@ -202,14 +247,26 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 		if m.selected[f.AbsPath] {
 			mark = styleWarn.Render("● ")
 		}
+		// Shrink the name column on narrow panels so the size and the
+		// SSD/NAS status icons always stay visible.
+		nameW := w - 28
+		if nameW > 22 {
+			nameW = 22
+		}
+		if nameW < 8 {
+			nameW = 8
+		}
 		name := filepath.Base(f.RelPath)
-		label = fmt.Sprintf("%s%s%-22s %8s  %s%s",
-			indent, mark, truncate(name, 22), fmtBytes(f.Size), ssdIcon, nasIcon)
+		label = fmt.Sprintf("%s%s%-*s %8s  %s%s",
+			indent, mark, nameW, truncate(name, nameW), fmtBytes(f.Size), ssdIcon, nasIcon)
 	}
 
+	// Truncate before applying Width — lipgloss wraps overlong content, which
+	// would break the one-line-per-node invariant of the tree.
+	label = ansi.Truncate(label, w, "…")
 	s := lipgloss.NewStyle().Width(w)
 	if focused {
-		s = s.Background(lipgloss.Color("#1e3a5f")).Foreground(colorWhite)
+		s = styleFocused.Width(w)
 	}
 	return s.Render(label)
 }
@@ -250,7 +307,7 @@ func (m *Model) renderDetailPanel(w, h int) string {
 func (m *Model) renderFileDetail(f *scan.FileInfo, w, h int) []string {
 	var lines []string
 	add := func(s string) {
-		lines = append(lines, lipgloss.NewStyle().Width(w).Render(s))
+		lines = append(lines, lipgloss.NewStyle().Width(w).Render(ansi.Truncate(s, w, "…")))
 	}
 
 	add(styleHeader.Render(filepath.Base(f.RelPath)))
@@ -284,7 +341,7 @@ func (m *Model) renderFileDetail(f *scan.FileInfo, w, h int) []string {
 func (m *Model) renderDayDetail(node treeNode, w, h int) []string {
 	var lines []string
 	add := func(s string) {
-		lines = append(lines, lipgloss.NewStyle().Width(w).Render(s))
+		lines = append(lines, lipgloss.NewStyle().Width(w).Render(ansi.Truncate(s, w, "…")))
 	}
 
 	files := m.dayFiles(node.year, node.month, node.day)
@@ -323,48 +380,57 @@ func (m *Model) renderDayDetail(node treeNode, w, h int) []string {
 func (m *Model) renderGrid() string {
 	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
 	cols := m.gridCols()
-	thumbCellW := m.width / cols
+	thumbCellW := (m.width - 2) / cols
 	thumbH := 8
 
-	var sb strings.Builder
-	sb.WriteString(styleTitle.Render(fmt.Sprintf("  %s · %d files", m.gridDay, len(files))) + "\n\n")
-
+	// Build one cell (thumbnail + label) per file, then join them into rows.
+	cells := make([]string, 0, len(files))
 	for i, f := range files {
-		col := i % cols
 		name := filepath.Base(f.RelPath)
 
-		focused := i == m.gridCursor
-		label := truncate(name, thumbCellW-2)
-		if focused {
-			label = styleWarn.Render("▶ " + label)
-		} else {
-			label = "  " + label
+		prefix := "  "
+		switch {
+		case i == m.gridCursor && m.selected[f.AbsPath]:
+			prefix = styleWarn.Render("▶●")
+		case i == m.gridCursor:
+			prefix = styleWarn.Render("▶ ")
+		case m.selected[f.AbsPath]:
+			prefix = styleWarn.Render("● ")
 		}
+		label := prefix + truncate(name, thumbCellW-3)
 
-		if col == 0 && i > 0 {
-			sb.WriteString("\n")
-		}
-
-		// Render thumbnail or placeholder.
 		var art string
 		if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
 			art = preview.BlockArt(img, thumbCellW-2, thumbH)
 		} else {
 			// Placeholder box.
-			art = strings.Repeat(styleDim.Render(strings.Repeat("░", thumbCellW-2))+"\n", thumbH)
+			art = strings.TrimRight(
+				strings.Repeat(styleDim.Render(strings.Repeat("░", thumbCellW-2))+"\n", thumbH), "\n")
 		}
 
-		sb.WriteString(art)
-		sb.WriteString(label + "\n")
+		cell := lipgloss.NewStyle().Width(thumbCellW).Render(strings.TrimRight(art, "\n") + "\n" + label)
+		cells = append(cells, cell)
 	}
 
-	sb.WriteString("\n" + styleStatusBar.Render("[←→↑↓] navigate  [Enter/p] preview  [Esc] back"))
-	return sb.String()
+	var sb strings.Builder
+	for i := 0; i < len(cells); i += cols {
+		end := i + cols
+		if end > len(cells) {
+			end = len(cells)
+		}
+		sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, cells[i:end]...))
+		sb.WriteString("\n")
+	}
+
+	title := fmt.Sprintf("%s · %d files", m.gridDay, len(files))
+	return m.screenFrame(title, sb.String(),
+		"[←→↑↓] navigate  [Enter/p] preview  [space] select  [Esc] back")
 }
 
 // renderPreview renders the full-screen preview screen.
 // With Kitty graphics support the image area is left blank — the image itself
-// is drawn on top by kittyDrawCmd after the frame is flushed.
+// is drawn on top by kittyDrawCmd after the frame is flushed (at cell (3,3),
+// which lands inside this screen's border).
 func (m *Model) renderPreview() string {
 	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
 	if m.gridCursor >= len(files) {
@@ -403,18 +469,14 @@ func (m *Model) renderPreview() string {
 		content = styleDim.Render("\n\n  Loading…")
 	}
 
-	header := styleTitle.Render(name) + "  " +
-		styleDim.Render(fmtBytes(f.Size)+" · "+f.ModTime.Format("2006-01-02 15:04"))
+	meta := styleDim.Render(fmt.Sprintf(" %s · %s · %d/%d",
+		fmtBytes(f.Size), f.ModTime.Format("2006-01-02 15:04"), m.gridCursor+1, len(files)))
 
-	hint := styleStatusBar.Render("[←/→] prev/next  [Esc] back")
-
-	return header + "\n" + content + "\n" + hint
+	return m.screenFrame(name, meta+"\n"+content, "[←/→] prev/next  [Esc] back")
 }
 
 // renderProgress renders the copy/verify progress screen.
 func (m *Model) renderProgress() string {
-	var sb strings.Builder
-
 	title := "Copying…"
 	switch m.progressMode {
 	case modePhase1:
@@ -426,19 +488,21 @@ func (m *Model) renderProgress() string {
 	case modeVerify:
 		title = "Verifying files…"
 	}
-	sb.WriteString(styleTitle.Render(title) + "\n\n")
 
 	if m.progressMode == modeVerify {
-		return sb.String() + m.renderVerifyProgress()
+		return m.screenFrame(title, m.renderVerifyProgress(), "[q] quit")
 	}
 
+	var sb strings.Builder
+	sb.WriteString("\n")
+
 	// Per-file progress bars in stable first-seen order.
-	barW := m.width - 52
+	barW := m.width - 54
 	if barW < 10 {
 		barW = 10
 	}
 	shown := 0
-	maxShown := m.height - 8
+	maxShown := m.height - 10
 	if maxShown < 1 {
 		maxShown = 1
 	}
@@ -467,7 +531,7 @@ func (m *Model) renderProgress() string {
 
 	// Overall progress by bytes, with file count.
 	sb.WriteString("\n")
-	overallBar := progressBar(m.width-30, int(bytesWritten), int(m.copyBytes))
+	overallBar := progressBar(m.width-32, int(bytesWritten), int(m.copyBytes))
 	sb.WriteString(fmt.Sprintf("  Overall: %s  %d/%d files · %s / %s\n",
 		overallBar, m.copyDone, m.copyTotal,
 		fmtBytes(bytesWritten), fmtBytes(m.copyBytes)))
@@ -476,19 +540,20 @@ func (m *Model) renderProgress() string {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("\n  %d file(s) failed so far.", m.failures)) + "\n")
 	}
 
-	return sb.String()
+	return m.screenFrame(title, sb.String(), "[q] quit")
 }
 
 // renderVerifyProgress renders the live verify view: overall bar + issue list.
 func (m *Model) renderVerifyProgress() string {
 	var sb strings.Builder
+	sb.WriteString("\n")
 
 	if m.verifyTotal == 0 {
 		sb.WriteString(styleDim.Render("  Scanning files…") + "\n")
 		return sb.String()
 	}
 
-	bar := progressBar(m.width-30, m.verifyDone, m.verifyTotal)
+	bar := progressBar(m.width-32, m.verifyDone, m.verifyTotal)
 	sb.WriteString(fmt.Sprintf("  %s  %d / %d files\n\n", bar, m.verifyDone, m.verifyTotal))
 
 	if len(m.verifyIssues) == 0 {
@@ -514,7 +579,7 @@ func (m *Model) renderVerifyProgress() string {
 // renderDone renders the completion screen.
 func (m *Model) renderDone() string {
 	var sb strings.Builder
-	sb.WriteString(styleOK.Render("  Done!") + "\n\n")
+	sb.WriteString("\n" + styleOK.Render("  Done!") + "\n\n")
 	sb.WriteString("  " + m.doneMsg + "\n")
 
 	if m.failures > 0 {
@@ -527,13 +592,13 @@ func (m *Model) renderDone() string {
 
 	sb.WriteString("\n  " + styleOK.Render("[r]") + " Rescan and return to main screen\n")
 	sb.WriteString("  " + styleDim.Render("[q]") + " Quit\n")
-	return sb.String()
+	return m.screenFrame("camera-backup", sb.String(), "[r] rescan  [e] errors  [q] quit")
 }
 
 // renderErrors renders the error summary screen (copy failures and verify issues).
 func (m *Model) renderErrors() string {
 	var sb strings.Builder
-	sb.WriteString(styleTitle.Render("  Error Summary") + "\n\n")
+	sb.WriteString("\n")
 
 	if len(m.failedFiles) == 0 && len(m.verifyIssues) == 0 {
 		sb.WriteString(styleDim.Render("  No errors recorded.\n"))
@@ -544,13 +609,12 @@ func (m *Model) renderErrors() string {
 		if fp.Err != nil {
 			errMsg = fp.Err.Error()
 		}
-		sb.WriteString(styleErr.Render(fmt.Sprintf("  %-40s  %s\n", name, errMsg)))
+		sb.WriteString(styleErr.Render(fmt.Sprintf("  %-40s  %s", name, errMsg)) + "\n")
 	}
 	for _, r := range m.verifyIssues {
 		name := truncate(filepath.Base(r.RelPath), 40)
-		sb.WriteString(styleWarn.Render(fmt.Sprintf("  %-40s  %s\n", name, strings.Join(r.Issues, ", "))))
+		sb.WriteString(styleWarn.Render(fmt.Sprintf("  %-40s  %s", name, strings.Join(r.Issues, ", "))) + "\n")
 	}
 
-	sb.WriteString("\n  " + styleDim.Render("[Esc/q]") + " Back\n")
-	return sb.String()
+	return m.screenFrame("Error Summary", sb.String(), "[Esc/q] back")
 }
