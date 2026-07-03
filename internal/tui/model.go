@@ -97,6 +97,7 @@ type Model struct {
 	gridMonth    string
 	gridDay      string
 	gridCursor   int
+	gridOffset   int // first visible thumbnail row (scroll position)
 
 	// copy/verify progress
 	progressMode  progressMode
@@ -474,8 +475,10 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.gridMonth = node.month
 			m.gridDay = node.day
 			m.gridCursor = 0
+			m.gridOffset = 0
+			m.statusMsg = ""
 			m.screen = screenGrid
-			return m, m.loadThumbsForDay(node.year, node.month, node.day)
+			return m, m.loadThumbsForGridWindow()
 		}
 
 	case "v", "V":
@@ -597,6 +600,9 @@ func (m *Model) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenPreview
 			return m, m.loadThumbsForPreview()
 		}
+	case "y", "Y":
+		// Copy directly from the grid; selection (if any) applies as usual.
+		return m.startCopy()
 	case " ":
 		if m.gridCursor < len(files) {
 			f := files[m.gridCursor]
@@ -609,23 +615,76 @@ func (m *Model) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "left", "h":
 		if m.gridCursor > 0 {
 			m.gridCursor--
+			return m, m.gridScrollToCursor()
 		}
 	case "right", "l":
 		if m.gridCursor < len(files)-1 {
 			m.gridCursor++
+			return m, m.gridScrollToCursor()
 		}
 	case "up", "k":
 		cols := m.gridCols()
 		if m.gridCursor >= cols {
 			m.gridCursor -= cols
+			return m, m.gridScrollToCursor()
 		}
 	case "down", "j":
 		cols := m.gridCols()
 		if m.gridCursor+cols < len(files) {
 			m.gridCursor += cols
+			return m, m.gridScrollToCursor()
 		}
 	}
 	return m, nil
+}
+
+// gridVisibleRows returns how many thumbnail rows fit inside the grid frame.
+func (m *Model) gridVisibleRows() int {
+	rowH := gridThumbH + 1 // thumbnail + label line
+	rows := (m.height - 3) / rowH
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
+// gridScrollToCursor scrolls the grid so the cursor row is visible and loads
+// thumbnails for the newly visible window.
+func (m *Model) gridScrollToCursor() tea.Cmd {
+	cols := m.gridCols()
+	row := m.gridCursor / cols
+	vis := m.gridVisibleRows()
+	if row < m.gridOffset {
+		m.gridOffset = row
+	}
+	if row >= m.gridOffset+vis {
+		m.gridOffset = row - vis + 1
+	}
+	return m.loadThumbsForGridWindow()
+}
+
+// loadThumbsForGridWindow fires thumbnail loads for the files in the visible
+// grid window (plus one lookahead row). Cached files are skipped, so scrolling
+// through a large day loads thumbnails incrementally instead of stopping at a
+// fixed cap.
+func (m *Model) loadThumbsForGridWindow() tea.Cmd {
+	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
+	cols := m.gridCols()
+	start := m.gridOffset * cols
+	end := (m.gridOffset + m.gridVisibleRows() + 1) * cols
+	if start < 0 {
+		start = 0
+	}
+	if end > len(files) {
+		end = len(files)
+	}
+	var cmds []tea.Cmd
+	for i := start; i < end; i++ {
+		if cmd := m.loadThumb(files[i].AbsPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) handlePreviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -657,23 +716,6 @@ func (m *Model) handlePreviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
-}
-
-// loadThumbsForDay fires thumbnail loads for every uncached file in a date
-// group (capped to keep exiftool fan-out reasonable).
-func (m *Model) loadThumbsForDay(year, month, day string) tea.Cmd {
-	const maxLoads = 32
-	files := m.dayFiles(year, month, day)
-	var cmds []tea.Cmd
-	for i, f := range files {
-		if i >= maxLoads {
-			break
-		}
-		if cmd := m.loadThumb(f.AbsPath); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	}
-	return tea.Batch(cmds...)
 }
 
 // loadThumbsForPreview loads the focused preview file (full size) plus
@@ -1033,6 +1075,9 @@ func (m *Model) startVerify() (tea.Model, tea.Cmd) {
 	m.screen = screenProgress
 	return m, verifyCmd(m.cfg, m.logger, m.p)
 }
+
+// gridThumbH is the height in text rows of one thumbnail in the grid.
+const gridThumbH = 8
 
 // gridCols computes the number of thumbnail columns that fit inside the
 // grid screen's border.

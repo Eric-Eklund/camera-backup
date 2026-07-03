@@ -376,55 +376,78 @@ func (m *Model) renderDayDetail(node treeNode, w, h int) []string {
 	return lines
 }
 
-// renderGrid renders the full-screen thumbnail grid for a date group.
+// renderGrid renders the full-screen thumbnail grid for a date group,
+// scrolled so the cursor row is visible.
 func (m *Model) renderGrid() string {
 	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
 	cols := m.gridCols()
 	thumbCellW := (m.width - 2) / cols
-	thumbH := 8
+	totalRows := (len(files) + cols - 1) / cols
+	visRows := m.gridVisibleRows()
 
-	// Build one cell (thumbnail + label) per file, then join them into rows.
-	cells := make([]string, 0, len(files))
-	for i, f := range files {
-		name := filepath.Base(f.RelPath)
+	// Clamp the scroll offset (window resizes can invalidate it).
+	if m.gridOffset > totalRows-visRows {
+		m.gridOffset = totalRows - visRows
+	}
+	if m.gridOffset < 0 {
+		m.gridOffset = 0
+	}
 
-		prefix := "  "
-		switch {
-		case i == m.gridCursor && m.selected[f.AbsPath]:
-			prefix = styleWarn.Render("▶●")
-		case i == m.gridCursor:
-			prefix = styleWarn.Render("▶ ")
-		case m.selected[f.AbsPath]:
-			prefix = styleWarn.Render("● ")
-		}
-		label := prefix + truncate(name, thumbCellW-3)
-
-		var art string
-		if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
-			art = preview.BlockArt(img, thumbCellW-2, thumbH)
-		} else {
-			// Placeholder box.
-			art = strings.TrimRight(
-				strings.Repeat(styleDim.Render(strings.Repeat("░", thumbCellW-2))+"\n", thumbH), "\n")
-		}
-
-		cell := lipgloss.NewStyle().Width(thumbCellW).Render(strings.TrimRight(art, "\n") + "\n" + label)
-		cells = append(cells, cell)
+	// Build one cell (thumbnail + label) per visible file, join into rows.
+	start := m.gridOffset * cols
+	end := (m.gridOffset + visRows) * cols
+	if end > len(files) {
+		end = len(files)
 	}
 
 	var sb strings.Builder
-	for i := 0; i < len(cells); i += cols {
-		end := i + cols
-		if end > len(cells) {
-			end = len(cells)
+	for rowStart := start; rowStart < end; rowStart += cols {
+		rowEnd := rowStart + cols
+		if rowEnd > end {
+			rowEnd = end
 		}
-		sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, cells[i:end]...))
+		cells := make([]string, 0, cols)
+		for i := rowStart; i < rowEnd; i++ {
+			f := files[i]
+			name := filepath.Base(f.RelPath)
+
+			prefix := "  "
+			switch {
+			case i == m.gridCursor && m.selected[f.AbsPath]:
+				prefix = styleWarn.Render("▶●")
+			case i == m.gridCursor:
+				prefix = styleWarn.Render("▶ ")
+			case m.selected[f.AbsPath]:
+				prefix = styleWarn.Render("● ")
+			}
+			label := prefix + truncate(name, thumbCellW-3)
+
+			var art string
+			if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
+				art = preview.BlockArt(img, thumbCellW-2, gridThumbH)
+			} else {
+				// Placeholder box.
+				art = strings.TrimRight(
+					strings.Repeat(styleDim.Render(strings.Repeat("░", thumbCellW-2))+"\n", gridThumbH), "\n")
+			}
+
+			cells = append(cells, lipgloss.NewStyle().Width(thumbCellW).Render(
+				strings.TrimRight(art, "\n")+"\n"+label))
+		}
+		sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, cells...))
 		sb.WriteString("\n")
 	}
 
 	title := fmt.Sprintf("%s · %d files", m.gridDay, len(files))
-	return m.screenFrame(title, sb.String(),
-		"[←→↑↓] navigate  [Enter/p] preview  [space] select  [Esc] back")
+	if totalRows > visRows {
+		title += fmt.Sprintf(" · rows %d–%d/%d", m.gridOffset+1, m.gridOffset+visRows, totalRows)
+	}
+	hint := fmt.Sprintf("file %d/%d   [←→↑↓] navigate  [Enter/p] preview  [space] select  [y] copy  [Esc] back",
+		m.gridCursor+1, len(files))
+	if m.statusMsg != "" {
+		hint = styleWarn.Render(m.statusMsg) + "   " + hint
+	}
+	return m.screenFrame(title, sb.String(), hint)
 }
 
 // renderPreview renders the full-screen preview screen.
