@@ -54,3 +54,7 @@ type fullImageMsg struct {
 }
 
 type deviceChangedMsg struct{}
+
+// progressTickMsg fires periodically while the progress screen is visible so
+// speeds and ETA update even when no copy events arrive.
+type progressTickMsg struct{}

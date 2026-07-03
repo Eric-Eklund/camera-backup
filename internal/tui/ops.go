@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"log"
@@ -27,24 +28,14 @@ func statusScanCmd(cfg *config.Config, logger *log.Logger) tea.Cmd {
 	}
 }
 
-func copyPhase1Cmd(tasks []copyop.Task, dstRoot string, logger *log.Logger, workers int, events chan<- copyop.FileProgress) tea.Cmd {
+// runBatchCmd runs a parallel copy batch, streaming progress to events (closed
+// by RunBatchParallel when done) and the failure count to result. The done
+// message itself is emitted by drainProgressCmd — after every progress event
+// has been forwarded — so completion counts are never racy.
+func runBatchCmd(ctx context.Context, tasks []copyop.Task, dstRoot string, logger *log.Logger, doVerify bool, workers int, events chan<- copyop.FileProgress, result chan<- int) tea.Cmd {
 	return func() tea.Msg {
-		failures := copyop.RunBatchParallel(tasks, dstRoot, logger, true, workers, events)
-		return phase1DoneMsg{failures: failures}
-	}
-}
-
-func copyPhase2Cmd(tasks []copyop.Task, dstRoot string, logger *log.Logger, workers int, events chan<- copyop.FileProgress) tea.Cmd {
-	return func() tea.Msg {
-		failures := copyop.RunBatchParallel(tasks, dstRoot, logger, false, workers, events)
-		return copyDoneMsg{failures: failures}
-	}
-}
-
-func syncCmd(tasks []copyop.Task, dstRoot string, logger *log.Logger, workers int, events chan<- copyop.FileProgress) tea.Cmd {
-	return func() tea.Msg {
-		failures := copyop.RunBatchParallel(tasks, dstRoot, logger, false, workers, events)
-		return copyDoneMsg{failures: failures}
+		result <- copyop.RunBatchParallel(ctx, tasks, dstRoot, logger, doVerify, workers, events)
+		return nil
 	}
 }
 
@@ -149,14 +140,21 @@ func kittyDrawCmd(img image.Image, cols, rows, row, col int) tea.Cmd {
 	})
 }
 
-// drainProgressCmd reads FileProgress events from events and sends them as tea.Msgs.
-// Returns when events is closed.
-func drainProgressCmd(events <-chan copyop.FileProgress, p *tea.Program) tea.Cmd {
+// progressTickCmd re-renders the progress screen twice a second so speeds and
+// ETA stay live even when no copy events arrive.
+func progressTickCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return progressTickMsg{} })
+}
+
+// drainProgressCmd forwards FileProgress events as tea.Msgs until events is
+// closed, then emits the batch-done message built from the failure count.
+// Emitting it here guarantees it arrives after every progress event.
+func drainProgressCmd(events <-chan copyop.FileProgress, result <-chan int, p *tea.Program, mkDone func(failures int) tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		for fp := range events {
 			p.Send(fileProgressMsg{p: fp})
 		}
-		return nil
+		return mkDone(<-result)
 	}
 }
 

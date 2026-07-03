@@ -3,6 +3,7 @@ package copyop
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"os"
@@ -274,6 +275,116 @@ func TestCopy_CollisionLogged(t *testing.T) {
 	}
 	if !strings.Contains(entry, "saved=") {
 		t.Error("expected saved path in log")
+	}
+}
+
+// ── RunBatchParallel ──────────────────────────────────────────────────────────
+
+// makeTasks writes n small source files and returns copy tasks for them.
+func makeTasks(t *testing.T, src string, n int) []Task {
+	t.Helper()
+	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	tasks := make([]Task, 0, n)
+	for i := 0; i < n; i++ {
+		name := filepath.Join(src, filepath.Base(t.Name())+string(rune('A'+i))+".NEF")
+		os.WriteFile(name, []byte("data"), 0644)
+		os.Chtimes(name, modtime, modtime)
+		tasks = append(tasks, Task{
+			Src:        scan.FileInfo{AbsPath: name, RelPath: filepath.Base(name), Size: 4, ModTime: modtime},
+			DstRelPath: "photos/2026-03-25/" + filepath.Base(name),
+		})
+	}
+	return tasks
+}
+
+// drain consumes all progress events and returns how many files completed.
+func drain(events <-chan FileProgress) (done int) {
+	for fp := range events {
+		if fp.Done && fp.Err == nil {
+			done++
+		}
+	}
+	return done
+}
+
+func TestRunBatchParallel_AllSucceed(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	logger := log.New(io.Discard, "", 0)
+	tasks := makeTasks(t, src, 3)
+
+	events := make(chan FileProgress, 64)
+	doneCh := make(chan int, 1)
+	go func() { doneCh <- drain(events) }()
+
+	failures := RunBatchParallel(context.Background(), tasks, dst, logger, false, 2, events)
+	if failures != 0 {
+		t.Errorf("failures = %d, want 0", failures)
+	}
+	if done := <-doneCh; done != 3 {
+		t.Errorf("completed files = %d, want 3", done)
+	}
+}
+
+func TestRunBatchParallel_CancelledBeforeStart(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	logger := log.New(io.Discard, "", 0)
+	tasks := makeTasks(t, src, 5)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the batch starts
+
+	events := make(chan FileProgress, 64)
+	doneCh := make(chan int, 1)
+	go func() { doneCh <- drain(events) }()
+
+	failures := RunBatchParallel(ctx, tasks, dst, logger, false, 2, events)
+	if failures != 0 {
+		t.Errorf("failures = %d, want 0 — cancelled tasks must not count as failures", failures)
+	}
+	if done := <-doneCh; done != 0 {
+		t.Errorf("completed files = %d, want 0 — no task should start after cancel", done)
+	}
+	// events must be closed (drain returned), and no destination files created.
+	entries, _ := os.ReadDir(dst)
+	if len(entries) != 0 {
+		t.Errorf("destination has %d entries, want 0", len(entries))
+	}
+}
+
+func TestRunBatchParallel_CancelMidBatch(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	logger := log.New(io.Discard, "", 0)
+	tasks := makeTasks(t, src, 20)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Unbuffered: every event send blocks until received, so cancel() is
+	// guaranteed to land before later files start — keeps the test deterministic.
+	events := make(chan FileProgress)
+	doneCh := make(chan int, 1)
+	go func() {
+		n := 0
+		for fp := range events {
+			if fp.Done && fp.Err == nil {
+				n++
+				if n == 2 {
+					cancel() // cancel once a couple of files have finished
+				}
+			}
+		}
+		doneCh <- n
+	}()
+
+	failures := RunBatchParallel(ctx, tasks, dst, logger, false, 1, events)
+	done := <-doneCh
+
+	if failures != 0 {
+		t.Errorf("failures = %d, want 0", failures)
+	}
+	if done >= len(tasks) {
+		t.Errorf("all %d files copied despite cancellation", done)
+	}
+	if done < 2 {
+		t.Errorf("completed files = %d, want at least the 2 that finished before cancel", done)
 	}
 }
 

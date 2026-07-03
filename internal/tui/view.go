@@ -376,55 +376,78 @@ func (m *Model) renderDayDetail(node treeNode, w, h int) []string {
 	return lines
 }
 
-// renderGrid renders the full-screen thumbnail grid for a date group.
+// renderGrid renders the full-screen thumbnail grid for a date group,
+// scrolled so the cursor row is visible.
 func (m *Model) renderGrid() string {
 	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
 	cols := m.gridCols()
 	thumbCellW := (m.width - 2) / cols
-	thumbH := 8
+	totalRows := (len(files) + cols - 1) / cols
+	visRows := m.gridVisibleRows()
 
-	// Build one cell (thumbnail + label) per file, then join them into rows.
-	cells := make([]string, 0, len(files))
-	for i, f := range files {
-		name := filepath.Base(f.RelPath)
+	// Clamp the scroll offset (window resizes can invalidate it).
+	if m.gridOffset > totalRows-visRows {
+		m.gridOffset = totalRows - visRows
+	}
+	if m.gridOffset < 0 {
+		m.gridOffset = 0
+	}
 
-		prefix := "  "
-		switch {
-		case i == m.gridCursor && m.selected[f.AbsPath]:
-			prefix = styleWarn.Render("▶●")
-		case i == m.gridCursor:
-			prefix = styleWarn.Render("▶ ")
-		case m.selected[f.AbsPath]:
-			prefix = styleWarn.Render("● ")
-		}
-		label := prefix + truncate(name, thumbCellW-3)
-
-		var art string
-		if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
-			art = preview.BlockArt(img, thumbCellW-2, thumbH)
-		} else {
-			// Placeholder box.
-			art = strings.TrimRight(
-				strings.Repeat(styleDim.Render(strings.Repeat("░", thumbCellW-2))+"\n", thumbH), "\n")
-		}
-
-		cell := lipgloss.NewStyle().Width(thumbCellW).Render(strings.TrimRight(art, "\n") + "\n" + label)
-		cells = append(cells, cell)
+	// Build one cell (thumbnail + label) per visible file, join into rows.
+	start := m.gridOffset * cols
+	end := (m.gridOffset + visRows) * cols
+	if end > len(files) {
+		end = len(files)
 	}
 
 	var sb strings.Builder
-	for i := 0; i < len(cells); i += cols {
-		end := i + cols
-		if end > len(cells) {
-			end = len(cells)
+	for rowStart := start; rowStart < end; rowStart += cols {
+		rowEnd := rowStart + cols
+		if rowEnd > end {
+			rowEnd = end
 		}
-		sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, cells[i:end]...))
+		cells := make([]string, 0, cols)
+		for i := rowStart; i < rowEnd; i++ {
+			f := files[i]
+			name := filepath.Base(f.RelPath)
+
+			prefix := "  "
+			switch {
+			case i == m.gridCursor && m.selected[f.AbsPath]:
+				prefix = styleWarn.Render("▶●")
+			case i == m.gridCursor:
+				prefix = styleWarn.Render("▶ ")
+			case m.selected[f.AbsPath]:
+				prefix = styleWarn.Render("● ")
+			}
+			label := prefix + truncate(name, thumbCellW-3)
+
+			var art string
+			if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
+				art = preview.BlockArt(img, thumbCellW-2, gridThumbH)
+			} else {
+				// Placeholder box.
+				art = strings.TrimRight(
+					strings.Repeat(styleDim.Render(strings.Repeat("░", thumbCellW-2))+"\n", gridThumbH), "\n")
+			}
+
+			cells = append(cells, lipgloss.NewStyle().Width(thumbCellW).Render(
+				strings.TrimRight(art, "\n")+"\n"+label))
+		}
+		sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, cells...))
 		sb.WriteString("\n")
 	}
 
 	title := fmt.Sprintf("%s · %d files", m.gridDay, len(files))
-	return m.screenFrame(title, sb.String(),
-		"[←→↑↓] navigate  [Enter/p] preview  [space] select  [Esc] back")
+	if totalRows > visRows {
+		title += fmt.Sprintf(" · rows %d–%d/%d", m.gridOffset+1, m.gridOffset+visRows, totalRows)
+	}
+	hint := fmt.Sprintf("file %d/%d   [←→↑↓] navigate  [Enter/p] preview  [space] select  [y] copy  [Esc] back",
+		m.gridCursor+1, len(files))
+	if m.statusMsg != "" {
+		hint = styleWarn.Render(m.statusMsg) + "   " + hint
+	}
+	return m.screenFrame(title, sb.String(), hint)
 }
 
 // renderPreview renders the full-screen preview screen.
@@ -502,7 +525,7 @@ func (m *Model) renderProgress() string {
 		barW = 10
 	}
 	shown := 0
-	maxShown := m.height - 10
+	maxShown := m.height - 12
 	if maxShown < 1 {
 		maxShown = 1
 	}
@@ -529,18 +552,33 @@ func (m *Model) renderProgress() string {
 		shown++
 	}
 
-	// Overall progress by bytes, with file count.
+	// Overall progress by bytes on its own line, stats (with speed and ETA)
+	// on the next so nothing gets truncated on narrow terminals.
 	sb.WriteString("\n")
-	overallBar := progressBar(m.width-32, int(bytesWritten), int(m.copyBytes))
-	sb.WriteString(fmt.Sprintf("  Overall: %s  %d/%d files · %s / %s\n",
-		overallBar, m.copyDone, m.copyTotal,
-		fmtBytes(bytesWritten), fmtBytes(m.copyBytes)))
+	sb.WriteString(fmt.Sprintf("  Overall  %s\n", progressBar(m.width-14, int(bytesWritten), int(m.copyBytes))))
+	stats := fmt.Sprintf("%d/%d files · %s / %s",
+		m.copyDone, m.copyTotal, fmtBytes(bytesWritten), fmtBytes(m.copyBytes))
+	if elapsed := time.Since(m.batchStart); elapsed > 2*time.Second && bytesWritten > 0 {
+		rate := float64(bytesWritten) / elapsed.Seconds()
+		stats += " · " + fmtBytes(int64(rate)) + "/s"
+		if remaining := m.copyBytes - bytesWritten; remaining > 0 && !m.cancelling && rate > 0 {
+			stats += " · ETA " + fmtDuration(time.Duration(float64(remaining)/rate*float64(time.Second)))
+		}
+	}
+	sb.WriteString("           " + styleDim.Render(stats) + "\n")
 
+	if m.cancelling {
+		sb.WriteString(styleWarn.Render("\n  Cancelling — files in progress will finish; queued files are skipped.") + "\n")
+	}
 	if m.failures > 0 {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("\n  %d file(s) failed so far.", m.failures)) + "\n")
 	}
 
-	return m.screenFrame(title, sb.String(), "[q] quit")
+	hint := "[q/esc] cancel after current files  [ctrl+c] force quit"
+	if m.cancelling {
+		hint = "cancelling…  [ctrl+c] force quit"
+	}
+	return m.screenFrame(title, sb.String(), hint)
 }
 
 // renderVerifyProgress renders the live verify view: overall bar + issue list.
