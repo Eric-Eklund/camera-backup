@@ -985,10 +985,11 @@ func (m *Model) startVerify() (tea.Model, tea.Cmd) {
 	return m, verifyCmd(m.cfg, m.logger, m.p)
 }
 
-// gridCols computes the number of thumbnail columns that fit in the current width.
+// gridCols computes the number of thumbnail columns that fit inside the
+// grid screen's border.
 func (m *Model) gridCols() int {
 	thumbW := 16 // approximate cell width per thumbnail
-	cols := m.width / thumbW
+	cols := (m.width - 2) / thumbW
 	if cols < 1 {
 		cols = 1
 	}
@@ -1080,34 +1081,22 @@ func truncate(s string, w int) string {
 	return "…" + string(runes[len(runes)-w+1:])
 }
 
-func renderDevice(name string, avail bool, freeBytes int64) string {
-	icon := styleDeviceOff.Render("❌")
-	if avail {
-		icon = styleDeviceOK.Render("✅")
-	}
-	label := styleDim.Render(name)
-	if avail && freeBytes > 0 {
-		label = fmt.Sprintf("%s %s free", name, fmtBytes(freeBytes))
-	}
-	return fmt.Sprintf("%s %s", icon, label)
-}
-
 // renderLoading renders the loading screen.
 func (m *Model) renderLoading() string {
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+	body := lipgloss.Place(m.width-2, m.height-3, lipgloss.Center, lipgloss.Center,
 		styleTitle.Render("camera-backup")+"\n\n"+m.statusMsg,
 	)
+	return m.screenFrame("camera-backup", body, "[q] quit")
 }
 
 // renderConfirm renders the Phase 1 done / confirm Phase 2 screen.
 func (m *Model) renderConfirm() string {
 	var sb strings.Builder
-	sb.WriteString(styleTitle.Render("Phase 1 Complete") + "\n\n")
-	sb.WriteString(fmt.Sprintf("  Copied %d files to SSD.\n", m.copyTotal))
+	sb.WriteString(fmt.Sprintf("\n  Copied %d files to SSD.\n", m.copyTotal))
 	if m.failures > 0 {
-		sb.WriteString(styleErr.Render(fmt.Sprintf("  %d files failed.\n", m.failures)))
+		sb.WriteString(styleErr.Render(fmt.Sprintf("  %d files failed.", m.failures)) + "\n")
 	}
 	sb.WriteString(fmt.Sprintf("\n  %d files to copy SSD → NAS.\n", len(m.phase2Tasks)))
 	sb.WriteString("\n  " + styleOK.Render("[y]") + " Start Phase 2   " + styleDim.Render("[n] Skip"))
-	return sb.String()
+	return m.screenFrame("Phase 1 Complete", sb.String(), "[y] start Phase 2  [n] skip")
 }

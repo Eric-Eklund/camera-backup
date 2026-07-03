@@ -14,8 +14,7 @@ var (
 
 	styleTab = lipgloss.NewStyle().
 			Padding(0, 2).
-			Foreground(colorGray).
-			Background(lipgloss.Color("#1f2937"))
+			Foreground(lipgloss.Color("#d1d5db"))
 
 	styleActiveTab = lipgloss.NewStyle().
 			Padding(0, 2).
@@ -43,9 +42,12 @@ var (
 			Foreground(colorWhite).
 			Background(lipgloss.Color("#1e3a5f"))
 
-	styleBorder = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(colorBorder)
+	stylePanelBorder = lipgloss.NewStyle().
+				Foreground(colorBorder)
+
+	stylePanelTitle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(colorBlue)
 
 	styleStatusBar = lipgloss.NewStyle().
 			Foreground(colorGray).
@@ -53,9 +55,6 @@ var (
 
 	styleProgressBar = lipgloss.NewStyle().
 				Foreground(colorBlue)
-
-	styleDeviceOK  = styleOK
-	styleDeviceOff = styleDim
 
 	styleHeader = lipgloss.NewStyle().
 			Bold(true).
