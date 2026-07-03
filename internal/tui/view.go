@@ -502,7 +502,7 @@ func (m *Model) renderProgress() string {
 		barW = 10
 	}
 	shown := 0
-	maxShown := m.height - 10
+	maxShown := m.height - 12
 	if maxShown < 1 {
 		maxShown = 1
 	}
@@ -529,18 +529,33 @@ func (m *Model) renderProgress() string {
 		shown++
 	}
 
-	// Overall progress by bytes, with file count.
+	// Overall progress by bytes on its own line, stats (with speed and ETA)
+	// on the next so nothing gets truncated on narrow terminals.
 	sb.WriteString("\n")
-	overallBar := progressBar(m.width-32, int(bytesWritten), int(m.copyBytes))
-	sb.WriteString(fmt.Sprintf("  Overall: %s  %d/%d files · %s / %s\n",
-		overallBar, m.copyDone, m.copyTotal,
-		fmtBytes(bytesWritten), fmtBytes(m.copyBytes)))
+	sb.WriteString(fmt.Sprintf("  Overall  %s\n", progressBar(m.width-14, int(bytesWritten), int(m.copyBytes))))
+	stats := fmt.Sprintf("%d/%d files · %s / %s",
+		m.copyDone, m.copyTotal, fmtBytes(bytesWritten), fmtBytes(m.copyBytes))
+	if elapsed := time.Since(m.batchStart); elapsed > 2*time.Second && bytesWritten > 0 {
+		rate := float64(bytesWritten) / elapsed.Seconds()
+		stats += " · " + fmtBytes(int64(rate)) + "/s"
+		if remaining := m.copyBytes - bytesWritten; remaining > 0 && !m.cancelling && rate > 0 {
+			stats += " · ETA " + fmtDuration(time.Duration(float64(remaining)/rate*float64(time.Second)))
+		}
+	}
+	sb.WriteString("           " + styleDim.Render(stats) + "\n")
 
+	if m.cancelling {
+		sb.WriteString(styleWarn.Render("\n  Cancelling — files in progress will finish; queued files are skipped.") + "\n")
+	}
 	if m.failures > 0 {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("\n  %d file(s) failed so far.", m.failures)) + "\n")
 	}
 
-	return m.screenFrame(title, sb.String(), "[q] quit")
+	hint := "[q/esc] cancel after current files  [ctrl+c] force quit"
+	if m.cancelling {
+		hint = "cancelling…  [ctrl+c] force quit"
+	}
+	return m.screenFrame(title, sb.String(), hint)
 }
 
 // renderVerifyProgress renders the live verify view: overall bar + issue list.

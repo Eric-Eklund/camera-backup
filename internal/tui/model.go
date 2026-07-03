@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"log"
@@ -106,6 +107,9 @@ type Model struct {
 	copyTotal     int
 	copyBytes     int64 // total bytes across all tasks in the running batch
 	failedFiles   []copyop.FileProgress
+	batchStart    time.Time          // when the running batch started, for overall speed/ETA
+	cancelBatch   context.CancelFunc // cancels the running batch; nil when idle
+	cancelling    bool               // user requested cancel; batch is draining
 
 	// verify progress
 	verifyIssues []verify.FileResult // files with problems, shown on error screen
@@ -218,7 +222,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case phase1DoneMsg:
 		m.failures = msg.failures
-		copied := m.copyTotal - msg.failures
+		m.cancelBatch = nil
+		copied := m.copyDone - msg.failures
+		if m.cancelling {
+			m.screen = screenDone
+			m.doneMsg = fmt.Sprintf("Cancelled: %d of %d files copied to SSD (%d skipped).",
+				copied, m.copyTotal, m.copyTotal-m.copyDone)
+			return m, nil
+		}
 		if m.status != nil && m.status.NASAvail {
 			// Rescan SSD vs NAS so Phase 2 copies from the SSD (never the
 			// camera) and picks up everything Phase 1 just wrote.
@@ -248,12 +259,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case copyDoneMsg:
 		m.failures += msg.failures
+		m.cancelBatch = nil
 		m.screen = screenDone
-		if m.failures > 0 {
+		switch {
+		case m.cancelling:
+			m.doneMsg = fmt.Sprintf("Cancelled: %d of %d files copied (%d skipped).",
+				m.copyDone-m.failures, m.copyTotal, m.copyTotal-m.copyDone)
+		case m.failures > 0:
 			m.doneMsg = fmt.Sprintf("Copy finished: %d of %d files copied, %d failed.",
 				m.copyDone-m.failures, m.copyTotal, m.failures)
-		} else {
+		default:
 			m.doneMsg = fmt.Sprintf("Copy complete: %d files.", m.copyDone)
+		}
+		return m, nil
+
+	case progressTickMsg:
+		// Keep ticking while the progress screen is visible; each tick
+		// re-renders so per-file speeds and the overall ETA stay live.
+		if m.screen == screenProgress {
+			return m, progressTickCmd()
 		}
 		return m, nil
 
@@ -336,8 +360,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePreviewKey(msg)
 
 	case screenProgress:
-		if msg.String() == "q" || msg.String() == "ctrl+c" {
+		switch msg.String() {
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q", "esc":
+			if m.progressMode == modeVerify {
+				// Verify only reads files — quitting mid-run is safe.
+				return m, tea.Quit
+			}
+			// Graceful cancel: files being copied finish, queued files are skipped.
+			if m.cancelBatch != nil && !m.cancelling {
+				m.cancelling = true
+				m.cancelBatch()
+			}
 		}
 
 	case screenConfirm:
@@ -869,6 +904,8 @@ func (m *Model) resetProgress(total int, totalBytes int64) {
 	m.fileProgress = map[string]copyop.FileProgress{}
 	m.progressOrder = nil
 	m.fileStart = map[string]time.Time{}
+	m.batchStart = time.Now()
+	m.cancelling = false
 }
 
 // startCopy determines which phase(s) to run and launches them.
@@ -909,10 +946,14 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		m.resetProgress(len(tasks), copyop.TotalSize(tasks))
 		m.progressMode = modePhase1
 		m.screen = screenProgress
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancelBatch = cancel
 		events := make(chan copyop.FileProgress, 64)
+		result := make(chan int, 1)
 		return m, tea.Batch(
-			copyPhase1Cmd(tasks, m.cfg.SSD, m.logger, m.cfg.SSDWorkerCount(), events),
-			drainProgressCmd(events, m.p),
+			runBatchCmd(ctx, tasks, m.cfg.SSD, m.logger, true, m.cfg.SSDWorkerCount(), events, result),
+			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return phase1DoneMsg{failures: f} }),
+			progressTickCmd(),
 		)
 
 	case !r.SourceAvail && r.SSDAvail && r.NASAvail:
@@ -938,10 +979,14 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		m.resetProgress(len(tasks), copyop.TotalSize(tasks))
 		m.progressMode = modeSync
 		m.screen = screenProgress
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancelBatch = cancel
 		events := make(chan copyop.FileProgress, 64)
+		result := make(chan int, 1)
 		return m, tea.Batch(
-			syncCmd(tasks, m.cfg.NAS, m.logger, m.cfg.NASWorkerCount(), events),
-			drainProgressCmd(events, m.p),
+			runBatchCmd(ctx, tasks, m.cfg.NAS, m.logger, false, m.cfg.NASWorkerCount(), events, result),
+			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
+			progressTickCmd(),
 		)
 
 	default:
@@ -962,10 +1007,14 @@ func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
 	m.failedFiles = nil
 	m.progressMode = modePhase2
 	m.screen = screenProgress
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelBatch = cancel
 	events := make(chan copyop.FileProgress, 64)
+	result := make(chan int, 1)
 	return m, tea.Batch(
-		copyPhase2Cmd(m.phase2Tasks, m.cfg.NAS, m.logger, m.cfg.NASWorkerCount(), events),
-		drainProgressCmd(events, m.p),
+		runBatchCmd(ctx, m.phase2Tasks, m.cfg.NAS, m.logger, false, m.cfg.NASWorkerCount(), events, result),
+		drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
+		progressTickCmd(),
 	)
 }
 
@@ -1049,6 +1098,22 @@ func fmtBytes(n int64) string {
 		return fmt.Sprintf("%.1f KB", float64(n)/KB)
 	default:
 		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// fmtDuration renders a duration compactly: "45s", "3m04s", "1h02m".
+func fmtDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := int(d.Hours())
+	min := int(d.Minutes()) % 60
+	sec := int(d.Seconds()) % 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm", h, min)
+	case min > 0:
+		return fmt.Sprintf("%dm%02ds", min, sec)
+	default:
+		return fmt.Sprintf("%ds", sec)
 	}
 }
 

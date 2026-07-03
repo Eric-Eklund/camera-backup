@@ -1,6 +1,7 @@
 package copyop
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -256,16 +257,33 @@ func copyWithWriter(t Task, dstRoot string, doVerify bool, logger *log.Logger, w
 // RunBatchParallel runs up to workers concurrent copies, sending FileProgress
 // snapshots to events as each chunk completes. Closes events when all tasks finish.
 // Returns the number of files that failed.
-func RunBatchParallel(tasks []Task, dstRoot string, logger *log.Logger, doVerify bool, workers int, events chan<- FileProgress) int {
+//
+// Cancelling ctx stops gracefully: files already being copied run to
+// completion (so the destination never holds partial files), but queued
+// tasks are not started. Cancelled tasks are not counted as failures.
+func RunBatchParallel(ctx context.Context, tasks []Task, dstRoot string, logger *log.Logger, doVerify bool, workers int, events chan<- FileProgress) int {
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	errCount := 0
 
+loop:
 	for _, t := range tasks {
+		if ctx.Err() != nil {
+			logger.Printf("CANCELLED  batch stopped before %s", t.DstRelPath)
+			break
+		}
 		t := t
 		wg.Add(1)
-		sem <- struct{}{}
+		// Acquire a worker slot, but bail out if the batch is cancelled while
+		// waiting so no new file starts after cancellation.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Done()
+			logger.Printf("CANCELLED  batch stopped before %s", t.DstRelPath)
+			break loop
+		}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
