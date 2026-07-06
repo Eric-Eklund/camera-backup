@@ -5,11 +5,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"strings"
+
 	"time"
 
-	"github.com/spf13/cobra"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
@@ -182,7 +183,8 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
 
 	sourceAvail := isDir(cfg.Source)
-	ssdAvail := isDir(cfg.SSD)
+	ssdPhotosAvail := config.RootAvailable(cfg.SSDPhotos)
+	ssdVideosAvail := config.RootAvailable(cfg.SSDVideos)
 
 	// ── Phase 1: Camera → SSD ─────────────────────────────────────────────────
 	ui.Bold.Println("\n  Phase 1: Camera → SSD")
@@ -193,31 +195,46 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 		ui.Yellow.Printf("  Camera not available at %s — skipping.\n", cfg.Source)
 		ui.Yellow.Println("  To sync SSD → NAS only, run: camera-backup sync")
 		logger.Println("Phase 1 skipped: camera not available")
-	} else if !ssdAvail {
-		return fmt.Errorf("SSD not accessible at %s", cfg.SSD)
+	} else if !ssdPhotosAvail && !ssdVideosAvail {
+		return fmt.Errorf("SSD not accessible at %s or %s", cfg.SSDPhotos, cfg.SSDVideos)
 	} else {
 		phase1Ran = true
 		cameraFiles, err := scan.Walk(cfg.Source, exts)
 		if err != nil {
 			return err
 		}
-		ssdFiles, _ := scan.Walk(cfg.SSD, exts)
-		ssdIndex := scan.IndexByRelPath(ssdFiles)
-		missing := scan.MissingFromDest(cameraFiles, ssdIndex, categoryFn)
+		camPhotos, camVideos := scan.SplitByCategory(cameraFiles, categoryFn)
+		ssdPhotoFiles, ssdVideoFiles := scan.WalkDual(cfg.SSDPhotos, cfg.SSDVideos, exts)
 
-		if len(missing) == 0 {
+		// Build tasks per category; a category whose root is unavailable is
+		// skipped with a warning so the other category can still be backed up.
+		var tasks []copyop.Task
+		addCategory := func(files []scan.FileInfo, cat string, avail bool, dstFiles []scan.FileInfo) {
+			if len(files) == 0 {
+				return
+			}
+			if !avail {
+				ui.Yellow.Printf("  ⚠️  %d %s file(s) skipped — %s root not available at %s\n",
+					len(files), cat, cat, cfg.SSDRoot(cat))
+				logger.Printf("Phase 1: %d %s files skipped, root unavailable", len(files), cat)
+				return
+			}
+			for _, f := range scan.MissingFromDest(files, scan.IndexByRelPath(dstFiles)) {
+				tasks = append(tasks, copyop.Task{Src: f, DstRoot: cfg.SSDRoot(cat), DstRelPath: f.DestRelPath()})
+			}
+		}
+		addCategory(camPhotos, "photos", ssdPhotosAvail, ssdPhotoFiles)
+		addCategory(camVideos, "videos", ssdVideosAvail, ssdVideoFiles)
+
+		if len(tasks) == 0 {
 			ui.Green.Println("\n  SSD is already up to date — nothing to copy.")
 			logger.Println("SSD already up to date")
 		} else {
-			tasks := make([]copyop.Task, len(missing))
-			for i, f := range missing {
-				tasks[i] = copyop.Task{Src: f, DstRelPath: f.DestRelPath(cfg.Category(f.RelPath))}
-			}
-			if err := checkSpace(cfg.SSD, tasks); err != nil {
+			if err := copyop.CheckSpace(tasks); err != nil {
 				return err
 			}
 			ui.Bold.Printf("\n  Copying %d file(s) to SSD...\n", len(tasks))
-			errs := copyop.RunBatch(tasks, cfg.SSD, logger, true)
+			errs := copyop.RunBatch(tasks, logger, true)
 			fmt.Println()
 			if errs > 0 {
 				ui.Red.Printf("  ❌  %d file(s) failed to copy — do not disconnect the camera.\n", errs)
@@ -252,54 +269,70 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 // It is called by both the copy command (phase 2) and the standalone sync command.
 func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
 	exts := cfg.NormalisedExtensions()
+	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
 
 	ui.Bold.Println("  SSD → NAS")
 	fmt.Println("  ─────────────────────────────────────────")
 
-	nasAvail := cfg.NAS != "" && isDir(cfg.NAS)
-	if !nasAvail {
+	nasPhotosAvail := config.RootAvailable(cfg.NASPhotos)
+	nasVideosAvail := config.RootAvailable(cfg.NASVideos)
+	if !nasPhotosAvail && !nasVideosAvail {
 		fmt.Println()
-		ui.Yellow.Printf("  NAS not available at %s\n", cfg.NAS)
-		ui.Yellow.Println("  Connect to VPN or ensure the NAS drive is mapped, then run:")
+		ui.Yellow.Printf("  NAS not available at %s or %s\n", cfg.NASPhotos, cfg.NASVideos)
+		ui.Yellow.Println("  Connect to VPN or ensure the NAS share is mounted, then run:")
 		ui.Dim.Println("    camera-backup sync")
 		logger.Println("SSD→NAS skipped: NAS not available")
 		return nil
 	}
 
-	ssdFiles, _ := scan.Walk(cfg.SSD, exts)
-	nasFiles, _ := scan.Walk(cfg.NAS, exts)
-	nasIndex := scan.IndexByRelPath(nasFiles)
-	toNAS := scan.MissingByRelPath(ssdFiles, nasIndex)
-
-	// Filter to videos only if requested.
-	if videosOnly {
-		var filtered []scan.FileInfo
-		for _, f := range toNAS {
-			if cfg.Category(f.RelPath) == "videos" {
-				filtered = append(filtered, f)
-			}
-		}
-		toNAS = filtered
+	ssdPhotoFiles, ssdVideoFiles := scan.WalkDual(cfg.SSDPhotos, cfg.SSDVideos, exts)
+	var ssdAll []scan.FileInfo
+	if cfg.SSDMerged() {
+		ssdAll = ssdPhotoFiles
 	} else {
-		// Always send videos before photos so large files are prioritised.
-		sort.SliceStable(toNAS, func(i, j int) bool {
-			return cfg.Category(toNAS[i].RelPath) == "videos" &&
-				cfg.Category(toNAS[j].RelPath) != "videos"
-		})
+		ssdAll = append(append([]scan.FileInfo{}, ssdPhotoFiles...), ssdVideoFiles...)
 	}
+	photos, videos := scan.SplitByCategory(ssdAll, categoryFn)
+	nasPhotoFiles, nasVideoFiles := scan.WalkDual(cfg.NASPhotos, cfg.NASVideos, exts)
 
-	if len(toNAS) == 0 {
+	// Build tasks per category, videos first so large files are prioritised
+	// if the connection drops. A category whose NAS root is unavailable is
+	// skipped with a warning; duplicates across SSD roots are copied once.
+	var tasks []copyop.Task
+	addCategory := func(files []scan.FileInfo, cat string, avail bool, nasFiles []scan.FileInfo) {
+		if videosOnly && cat != "videos" {
+			return
+		}
+		missing := scan.MissingByRelPath(files, scan.IndexByRelPath(nasFiles))
+		if len(missing) == 0 {
+			return
+		}
+		if !avail {
+			ui.Yellow.Printf("  ⚠️  %d %s file(s) skipped — NAS %s root not available at %s\n",
+				len(missing), cat, cat, cfg.NASRoot(cat))
+			logger.Printf("SSD→NAS: %d %s files skipped, root unavailable", len(missing), cat)
+			return
+		}
+		seen := map[string]bool{}
+		for _, f := range missing {
+			key := strings.ToLower(f.RelPath)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			tasks = append(tasks, copyop.Task{Src: f, DstRoot: cfg.NASRoot(cat), DstRelPath: f.RelPath})
+		}
+	}
+	addCategory(videos, "videos", nasVideosAvail, nasVideoFiles)
+	addCategory(photos, "photos", nasPhotosAvail, nasPhotoFiles)
+
+	if len(tasks) == 0 {
 		ui.Green.Println("\n  NAS is already up to date — nothing to copy.")
 		logger.Println("NAS already up to date")
 		return nil
 	}
 
-	tasks := make([]copyop.Task, len(toNAS))
-	for i, f := range toNAS {
-		tasks[i] = copyop.Task{Src: f, DstRelPath: f.RelPath}
-	}
-
-	if err := checkSpace(cfg.NAS, tasks); err != nil {
+	if err := copyop.CheckSpace(tasks); err != nil {
 		return err
 	}
 	if videosOnly {
@@ -309,26 +342,12 @@ func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
 		ui.Bold.Printf("\n  Copying %d file(s) to NAS (videos first)...\n", len(tasks))
 		logger.Println("SSD → NAS")
 	}
-	errs := copyop.RunBatch(tasks, cfg.NAS, logger, false)
+	errs := copyop.RunBatch(tasks, logger, false)
 	fmt.Println()
 	if errs > 0 {
 		ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
 	} else {
 		ui.Green.Printf("  ✅  %d file(s) copied.\n", len(tasks))
-	}
-	return nil
-}
-
-// checkSpace returns an error if the destination lacks space for all tasks.
-func checkSpace(dest string, tasks []copyop.Task) error {
-	needed := copyop.TotalSize(tasks)
-	free, err := ui.FreeSpace(dest)
-	if err != nil {
-		return nil // can't determine free space — let the copy proceed
-	}
-	if needed > free {
-		return fmt.Errorf("not enough space on %s: need %s but only %s free",
-			dest, ui.FormatBytes(needed), ui.FormatBytes(free))
 	}
 	return nil
 }

@@ -37,9 +37,9 @@ const (
 type progressMode int
 
 const (
-	modePhase1  progressMode = iota // Camera→SSD verify
-	modePhase2                      // SSD→NAS fast
-	modeSync                        // SSD→NAS sync (no camera)
+	modePhase1 progressMode = iota // Camera→SSD verify
+	modePhase2                     // SSD→NAS fast
+	modeSync                       // SSD→NAS sync (no camera)
 	modeVerify
 )
 
@@ -67,9 +67,12 @@ type Model struct {
 
 	// status scan
 	status    *status.StatusResult
-	statusMsg string          // shown in status bar while scanning
-	ssdKeys   map[string]bool // lowercased dest relpaths present on SSD
-	nasKeys   map[string]bool // lowercased dest relpaths present on NAS
+	statusMsg string // shown in status bar while scanning
+	// Lowercased dest relpaths present on each device, keyed by category —
+	// lookups go against the file's designated root, matching how the
+	// missing-file computation works.
+	ssdKeys map[string]map[string]bool
+	nasKeys map[string]map[string]bool
 
 	// tabs: e.g. ["All (312)", "Missing on SSD (12)", "Missing on NAS (47)"]
 	tabs      []string
@@ -77,15 +80,15 @@ type Model struct {
 	activeTab int
 
 	// tree
-	allFiles     []scan.FileInfo // files shown in current tab
-	tree         treeFiles
-	yearOrder    []string                    // sorted years
-	monthOrder   map[string][]string         // year → sorted months
-	dayOrder     map[string]map[string][]string // year → month → sorted days
-	expanded     map[string]bool             // "year", "year/month", "year/month/day" → expanded
-	visible      []treeNode
-	cursor       int
-	selected     map[string]bool             // absPath → selected; empty = operate on all
+	allFiles   []scan.FileInfo // files shown in current tab
+	tree       treeFiles
+	yearOrder  []string                       // sorted years
+	monthOrder map[string][]string            // year → sorted months
+	dayOrder   map[string]map[string][]string // year → month → sorted days
+	expanded   map[string]bool                // "year", "year/month", "year/month/day" → expanded
+	visible    []treeNode
+	cursor     int
+	selected   map[string]bool // absPath → selected; empty = operate on all
 
 	// detail / preview
 	thumbCache   map[string]image.Image // absPath → decoded image (nil = unsupported)
@@ -94,7 +97,7 @@ type Model struct {
 	loadingFull  map[string]bool        // absPath → full image load in flight
 	kitty        bool                   // terminal supports Kitty Graphics Protocol
 	prevScreen   Screen
-	helpReturn   Screen                 // screen to return to when help closes
+	helpReturn   Screen // screen to return to when help closes
 	gridYear     string
 	gridMonth    string
 	gridDay      string
@@ -104,8 +107,8 @@ type Model struct {
 	// copy/verify progress
 	progressMode  progressMode
 	fileProgress  map[string]copyop.FileProgress
-	progressOrder []string                 // RelPaths in first-seen order for stable rendering
-	fileStart     map[string]time.Time     // RelPath → first event time, for speed calc
+	progressOrder []string             // RelPaths in first-seen order for stable rendering
+	fileStart     map[string]time.Time // RelPath → first event time, for speed calc
 	copyDone      int
 	copyTotal     int
 	copyBytes     int64 // total bytes across all tasks in the running batch
@@ -113,6 +116,7 @@ type Model struct {
 	batchStart    time.Time          // when the running batch started, for overall speed/ETA
 	cancelBatch   context.CancelFunc // cancels the running batch; nil when idle
 	cancelling    bool               // user requested cancel; batch is draining
+	skippedNoRoot int                // files skipped because their category root is unmounted
 
 	// verify progress
 	verifyIssues []verify.FileResult // files with problems, shown on error screen
@@ -130,7 +134,7 @@ type Model struct {
 type tabKey int
 
 const (
-	tabAll           tabKey = iota
+	tabAll tabKey = iota
 	tabMissingOnSSD
 	tabMissingOnNAS
 )
@@ -191,8 +195,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = msg.result
-		m.ssdKeys = relPathSet(msg.result.SSDFiles)
-		m.nasKeys = relPathSet(msg.result.NASFiles)
+		m.ssdKeys = map[string]map[string]bool{
+			"photos": relPathSet(msg.result.SSDPhotoFiles),
+			"videos": relPathSet(msg.result.SSDVideoFiles),
+		}
+		m.nasKeys = map[string]map[string]bool{
+			"photos": relPathSet(msg.result.NASPhotoFiles),
+			"videos": relPathSet(msg.result.NASVideoFiles),
+		}
 		m.buildTabs()
 		m.setTab(m.activeTab)
 		m.screen = screenMain
@@ -233,27 +243,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				copied, m.copyTotal, m.copyTotal-m.copyDone)
 			return m, nil
 		}
-		if m.status != nil && m.status.NASAvail {
+		if m.status != nil && m.status.NASAvail() {
 			// Rescan SSD vs NAS so Phase 2 copies from the SSD (never the
 			// camera) and picks up everything Phase 1 just wrote.
 			m.statusMsg = "Scanning SSD → NAS…"
 			return m, preparePhase2Cmd(m.cfg, m.logger)
 		}
 		m.screen = screenDone
-		m.doneMsg = fmt.Sprintf("Phase 1 complete: %d of %d files copied to SSD.", copied, m.copyTotal)
+		m.doneMsg = fmt.Sprintf("Phase 1 complete: %d of %d files copied to SSD.%s",
+			copied, m.copyTotal, skippedNote(m.skippedNoRoot))
 		return m, nil
 
 	case phase2ReadyMsg:
 		m.statusMsg = ""
-		if msg.err != nil {
-			m.lastErr = msg.err
-			m.screen = screenDone
-			m.doneMsg = "Phase 2 scan failed: " + msg.err.Error()
-			return m, nil
-		}
+		m.skippedNoRoot = msg.skipped
 		if len(msg.tasks) == 0 {
 			m.screen = screenDone
-			m.doneMsg = "Phase 1 complete — NAS is already up to date."
+			if msg.skipped > 0 {
+				m.doneMsg = fmt.Sprintf("Phase 1 complete — nothing to copy to NAS.%s", skippedNote(msg.skipped))
+			} else {
+				m.doneMsg = "Phase 1 complete — NAS is already up to date."
+			}
 			return m, nil
 		}
 		m.phase2Tasks = msg.tasks
@@ -269,10 +279,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doneMsg = fmt.Sprintf("Cancelled: %d of %d files copied (%d skipped).",
 				m.copyDone-m.failures, m.copyTotal, m.copyTotal-m.copyDone)
 		case m.failures > 0:
-			m.doneMsg = fmt.Sprintf("Copy finished: %d of %d files copied, %d failed.",
-				m.copyDone-m.failures, m.copyTotal, m.failures)
+			m.doneMsg = fmt.Sprintf("Copy finished: %d of %d files copied, %d failed.%s",
+				m.copyDone-m.failures, m.copyTotal, m.failures, skippedNote(m.skippedNoRoot))
 		default:
-			m.doneMsg = fmt.Sprintf("Copy complete: %d files.", m.copyDone)
+			m.doneMsg = fmt.Sprintf("Copy complete: %d files.%s", m.copyDone, skippedNote(m.skippedNoRoot))
 		}
 		return m, nil
 
@@ -780,7 +790,7 @@ func (m *Model) buildTabs() {
 	m.tabKeys = nil
 	r := m.status
 
-	if r.SourceAvail || r.SSDAvail {
+	if r.SourceAvail || r.SSDAvail() {
 		count := len(r.CameraFiles)
 		if !r.SourceAvail {
 			count = len(r.SSDFiles)
@@ -788,11 +798,11 @@ func (m *Model) buildTabs() {
 		m.tabs = append(m.tabs, fmt.Sprintf("All (%d)", count))
 		m.tabKeys = append(m.tabKeys, tabAll)
 	}
-	if r.SourceAvail && r.SSDAvail {
+	if r.SourceAvail && r.SSDAvail() {
 		m.tabs = append(m.tabs, fmt.Sprintf("Missing on SSD (%d)", len(r.MissingOnSSD)))
 		m.tabKeys = append(m.tabKeys, tabMissingOnSSD)
 	}
-	if r.NASAvail {
+	if r.NASAvail() {
 		m.tabs = append(m.tabs, fmt.Sprintf("Missing on NAS (%d)", len(r.MissingOnNAS)))
 		m.tabKeys = append(m.tabKeys, tabMissingOnNAS)
 	}
@@ -985,6 +995,7 @@ func (m *Model) resetProgress(total int, totalBytes int64) {
 // startCopy determines which phase(s) to run and launches them.
 // If a selection is active, only selected files are copied (camera→SSD and
 // sync modes); Phase 2 after a camera copy always pushes everything missing.
+// Files whose category root is unmounted are skipped and reported.
 func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 	if m.status == nil {
 		return m, nil
@@ -993,19 +1004,24 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 
 	m.failures = 0
 	m.failedFiles = nil
+	m.skippedNoRoot = 0
 
 	switch {
-	case r.SourceAvail && r.SSDAvail:
+	case r.SourceAvail && r.SSDAvail():
 		// Phase 1: Camera→SSD (with verify); Phase 2: SSD→NAS (if available).
 		missing := m.selectedIn(r.MissingOnSSD)
 		if len(m.selected) > 0 && len(missing) == 0 {
 			m.statusMsg = "No selected files need copying to SSD."
 			return m, nil
 		}
-		sub := &status.StatusResult{MissingOnSSD: missing}
-		tasks := buildPhase1Tasks(sub, m.cfg)
+		tasks, skipped := buildPhase1Tasks(missing, m.cfg, r)
+		m.skippedNoRoot = skipped
 		if len(tasks) == 0 {
-			if !r.NASAvail {
+			if skipped > 0 {
+				m.statusMsg = fmt.Sprintf("%d file(s) skipped — category root not mounted.", skipped)
+				return m, nil
+			}
+			if !r.NASAvail() {
 				m.statusMsg = "SSD is already up to date."
 				return m, nil
 			}
@@ -1013,7 +1029,7 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 			m.statusMsg = "Scanning SSD → NAS…"
 			return m, preparePhase2Cmd(m.cfg, m.logger)
 		}
-		if err := checkSpace(m.cfg.SSD, tasks); err != nil {
+		if err := copyop.CheckSpace(tasks); err != nil {
 			m.statusMsg = err.Error()
 			return m, nil
 		}
@@ -1025,28 +1041,29 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		events := make(chan copyop.FileProgress, 64)
 		result := make(chan int, 1)
 		return m, tea.Batch(
-			runBatchCmd(ctx, tasks, m.cfg.SSD, m.logger, true, m.cfg.SSDWorkerCount(), events, result),
+			runBatchCmd(ctx, tasks, m.logger, true, m.cfg.SSDWorkerCount(), events, result),
 			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return phase1DoneMsg{failures: f} }),
 			progressTickCmd(),
 		)
 
-	case !r.SourceAvail && r.SSDAvail && r.NASAvail:
+	case !r.SourceAvail && r.SSDAvail() && r.NASAvail():
 		// Sync SSD→NAS only.
 		missing := m.selectedIn(r.MissingOnNAS)
 		if len(m.selected) > 0 && len(missing) == 0 {
 			m.statusMsg = "No selected files need syncing to NAS."
 			return m, nil
 		}
-		tasks := make([]copyop.Task, 0, len(missing))
-		for _, f := range missing {
-			tasks = append(tasks, copyop.Task{Src: f, DstRelPath: f.RelPath})
-		}
-		sortVideosFirst(tasks, m.cfg)
+		tasks, skipped := buildSyncTasks(missing, m.cfg, r)
+		m.skippedNoRoot = skipped
 		if len(tasks) == 0 {
-			m.statusMsg = "NAS is already up to date."
+			if skipped > 0 {
+				m.statusMsg = fmt.Sprintf("%d file(s) skipped — NAS category root not mounted.", skipped)
+			} else {
+				m.statusMsg = "NAS is already up to date."
+			}
 			return m, nil
 		}
-		if err := checkSpace(m.cfg.NAS, tasks); err != nil {
+		if err := copyop.CheckSpace(tasks); err != nil {
 			m.statusMsg = err.Error()
 			return m, nil
 		}
@@ -1058,7 +1075,7 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		events := make(chan copyop.FileProgress, 64)
 		result := make(chan int, 1)
 		return m, tea.Batch(
-			runBatchCmd(ctx, tasks, m.cfg.NAS, m.logger, false, m.cfg.NASWorkerCount(), events, result),
+			runBatchCmd(ctx, tasks, m.logger, false, m.cfg.NASWorkerCount(), events, result),
 			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
 			progressTickCmd(),
 		)
@@ -1071,7 +1088,7 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 
 // startPhase2 launches the SSD→NAS copy phase after user confirms.
 func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
-	if err := checkSpace(m.cfg.NAS, m.phase2Tasks); err != nil {
+	if err := copyop.CheckSpace(m.phase2Tasks); err != nil {
 		m.screen = screenDone
 		m.doneMsg = err.Error()
 		return m, nil
@@ -1086,7 +1103,7 @@ func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
 	events := make(chan copyop.FileProgress, 64)
 	result := make(chan int, 1)
 	return m, tea.Batch(
-		runBatchCmd(ctx, m.phase2Tasks, m.cfg.NAS, m.logger, false, m.cfg.NASWorkerCount(), events, result),
+		runBatchCmd(ctx, m.phase2Tasks, m.logger, false, m.cfg.NASWorkerCount(), events, result),
 		drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
 		progressTickCmd(),
 	)
@@ -1094,7 +1111,7 @@ func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
 
 // startVerify launches the verify pass with live per-file progress.
 func (m *Model) startVerify() (tea.Model, tea.Cmd) {
-	if m.status == nil || (!m.status.SourceAvail && !m.status.SSDAvail) {
+	if m.status == nil || (!m.status.SourceAvail && !m.status.SSDAvail()) {
 		m.statusMsg = "Nothing to verify — no camera or SSD available."
 		return m, nil
 	}
@@ -1217,6 +1234,15 @@ func relPathSet(files []scan.FileInfo) map[string]bool {
 	return set
 }
 
+// skippedNote formats the "N skipped" suffix for done messages, or "" when
+// nothing was skipped.
+func skippedNote(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" %d file(s) skipped — category root not mounted.", n)
+}
+
 func truncate(s string, w int) string {
 	runes := []rune(s)
 	if len(runes) <= w {
@@ -1241,6 +1267,9 @@ func (m *Model) renderConfirm() string {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("  %d files failed.", m.failures)) + "\n")
 	}
 	sb.WriteString(fmt.Sprintf("\n  %d files to copy SSD → NAS.\n", len(m.phase2Tasks)))
+	if m.skippedNoRoot > 0 {
+		sb.WriteString(styleWarn.Render(fmt.Sprintf("  %d file(s) skipped — NAS category root not mounted.", m.skippedNoRoot)) + "\n")
+	}
 	sb.WriteString("\n  " + styleOK.Render("[y]") + " Start Phase 2   " + styleDim.Render("[n] Skip"))
 	return m.screenFrame("Phase 1 Complete", sb.String(), "[y] start Phase 2  [n] skip")
 }

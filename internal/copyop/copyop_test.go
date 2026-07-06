@@ -106,14 +106,15 @@ func TestCopy_Success(t *testing.T) {
 
 	task := Task{
 		Src:        scan.FileInfo{AbsPath: srcFile, RelPath: "DCIM/DSC_0001.NEF", Size: int64(len(content)), ModTime: modtime},
-		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
+		DstRoot:    dst,
+		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
 
-	if err := Copy(task, dst, logger); err != nil {
+	if err := Copy(task, logger); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
 
-	dstFile := filepath.Join(dst, "photos/2026-03-25/DSC_0001.NEF")
+	dstFile := filepath.Join(dst, "2026-03-25/DSC_0001.NEF")
 
 	got, _ := os.ReadFile(dstFile)
 	if string(got) != string(content) {
@@ -139,17 +140,18 @@ func TestCopy_NeverOverwrites(t *testing.T) {
 	os.Chtimes(srcFile, modtime, modtime)
 
 	// Pre-existing file at destination with different content.
-	dstDir := filepath.Join(dst, "photos/2026-03-25")
+	dstDir := filepath.Join(dst, "2026-03-25")
 	os.MkdirAll(dstDir, 0755)
 	existing := filepath.Join(dstDir, "DSC_0001.NEF")
 	os.WriteFile(existing, []byte("existing file"), 0644)
 
 	task := Task{
 		Src:        scan.FileInfo{AbsPath: srcFile, RelPath: "DCIM/DSC_0001.NEF", Size: int64(len(content)), ModTime: modtime},
-		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
+		DstRoot:    dst,
+		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
 
-	if err := Copy(task, dst, logger); err != nil {
+	if err := Copy(task, logger); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
 
@@ -171,9 +173,10 @@ func TestCopy_MissingSource(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	task := Task{
 		Src:        scan.FileInfo{AbsPath: "/nonexistent/DSC_0001.NEF", RelPath: "DSC_0001.NEF", Size: 100, ModTime: time.Now()},
-		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
+		DstRoot:    t.TempDir(),
+		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
-	if err := Copy(task, t.TempDir(), logger); err == nil {
+	if err := Copy(task, logger); err == nil {
 		t.Fatal("expected error for missing source")
 	}
 }
@@ -211,12 +214,12 @@ func TestRunBatch_AllSucceed(t *testing.T) {
 	}
 
 	tasks := []Task{
-		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "A.NEF"), RelPath: "A.NEF", Size: 4, ModTime: modtime}, DstRelPath: "photos/2026-03-25/A.NEF"},
-		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "B.NEF"), RelPath: "B.NEF", Size: 4, ModTime: modtime}, DstRelPath: "photos/2026-03-25/B.NEF"},
-		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "C.JPG"), RelPath: "C.JPG", Size: 4, ModTime: modtime}, DstRelPath: "photos/2026-03-25/C.JPG"},
+		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "A.NEF"), RelPath: "A.NEF", Size: 4, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/A.NEF"},
+		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "B.NEF"), RelPath: "B.NEF", Size: 4, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/B.NEF"},
+		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "C.JPG"), RelPath: "C.JPG", Size: 4, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/C.JPG"},
 	}
 
-	if errs := RunBatch(tasks, dst, logger, false); errs != 0 {
+	if errs := RunBatch(tasks, logger, false); errs != 0 {
 		t.Errorf("errCount = %d, want 0", errs)
 	}
 }
@@ -231,11 +234,11 @@ func TestRunBatch_CountsErrors(t *testing.T) {
 	os.WriteFile(okFile, []byte("data"), 0644)
 
 	tasks := []Task{
-		{Src: scan.FileInfo{AbsPath: okFile, RelPath: "ok.NEF", Size: 4, ModTime: modtime}, DstRelPath: "photos/2026-03-25/ok.NEF"},
-		{Src: scan.FileInfo{AbsPath: "/nonexistent.NEF", RelPath: "missing.NEF", Size: 100, ModTime: modtime}, DstRelPath: "photos/2026-03-25/missing.NEF"},
+		{Src: scan.FileInfo{AbsPath: okFile, RelPath: "ok.NEF", Size: 4, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/ok.NEF"},
+		{Src: scan.FileInfo{AbsPath: "/nonexistent.NEF", RelPath: "missing.NEF", Size: 100, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/missing.NEF"},
 	}
 
-	if errs := RunBatch(tasks, dst, logger, false); errs != 1 {
+	if errs := RunBatch(tasks, logger, false); errs != 1 {
 		t.Errorf("errCount = %d, want 1", errs)
 	}
 }
@@ -251,7 +254,7 @@ func TestCopy_CollisionLogged(t *testing.T) {
 	os.Chtimes(srcFile, modtime, modtime)
 
 	// Pre-existing file at destination — forces a collision.
-	dstDir := filepath.Join(dst, "photos/2026-03-25")
+	dstDir := filepath.Join(dst, "2026-03-25")
 	os.MkdirAll(dstDir, 0755)
 	os.WriteFile(filepath.Join(dstDir, "DSC_0001.NEF"), []byte("existing"), 0644)
 
@@ -260,9 +263,10 @@ func TestCopy_CollisionLogged(t *testing.T) {
 
 	task := Task{
 		Src:        scan.FileInfo{AbsPath: srcFile, RelPath: "DCIM/DSC_0001.NEF", Size: int64(len(content)), ModTime: modtime},
-		DstRelPath: "photos/2026-03-25/DSC_0001.NEF",
+		DstRoot:    dst,
+		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
-	if err := Copy(task, dst, logger); err != nil {
+	if err := Copy(task, logger); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
 
@@ -270,7 +274,7 @@ func TestCopy_CollisionLogged(t *testing.T) {
 	if !strings.Contains(entry, "COLLISION") {
 		t.Error("expected COLLISION entry in log")
 	}
-	if !strings.Contains(entry, "original=photos/2026-03-25/DSC_0001.NEF") {
+	if !strings.Contains(entry, "original=2026-03-25/DSC_0001.NEF") {
 		t.Errorf("expected original path in log, got: %s", entry)
 	}
 	if !strings.Contains(entry, "saved=") {
@@ -280,8 +284,8 @@ func TestCopy_CollisionLogged(t *testing.T) {
 
 // ── RunBatchParallel ──────────────────────────────────────────────────────────
 
-// makeTasks writes n small source files and returns copy tasks for them.
-func makeTasks(t *testing.T, src string, n int) []Task {
+// makeTasks writes n small source files and returns copy tasks targeting dst.
+func makeTasks(t *testing.T, src, dst string, n int) []Task {
 	t.Helper()
 	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	tasks := make([]Task, 0, n)
@@ -291,7 +295,8 @@ func makeTasks(t *testing.T, src string, n int) []Task {
 		os.Chtimes(name, modtime, modtime)
 		tasks = append(tasks, Task{
 			Src:        scan.FileInfo{AbsPath: name, RelPath: filepath.Base(name), Size: 4, ModTime: modtime},
-			DstRelPath: "photos/2026-03-25/" + filepath.Base(name),
+			DstRoot:    dst,
+			DstRelPath: "2026-03-25/" + filepath.Base(name),
 		})
 	}
 	return tasks
@@ -310,13 +315,13 @@ func drain(events <-chan FileProgress) (done int) {
 func TestRunBatchParallel_AllSucceed(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	logger := log.New(io.Discard, "", 0)
-	tasks := makeTasks(t, src, 3)
+	tasks := makeTasks(t, src, dst, 3)
 
 	events := make(chan FileProgress, 64)
 	doneCh := make(chan int, 1)
 	go func() { doneCh <- drain(events) }()
 
-	failures := RunBatchParallel(context.Background(), tasks, dst, logger, false, 2, events)
+	failures := RunBatchParallel(context.Background(), tasks, logger, false, 2, events)
 	if failures != 0 {
 		t.Errorf("failures = %d, want 0", failures)
 	}
@@ -328,7 +333,7 @@ func TestRunBatchParallel_AllSucceed(t *testing.T) {
 func TestRunBatchParallel_CancelledBeforeStart(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	logger := log.New(io.Discard, "", 0)
-	tasks := makeTasks(t, src, 5)
+	tasks := makeTasks(t, src, dst, 5)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before the batch starts
@@ -337,7 +342,7 @@ func TestRunBatchParallel_CancelledBeforeStart(t *testing.T) {
 	doneCh := make(chan int, 1)
 	go func() { doneCh <- drain(events) }()
 
-	failures := RunBatchParallel(ctx, tasks, dst, logger, false, 2, events)
+	failures := RunBatchParallel(ctx, tasks, logger, false, 2, events)
 	if failures != 0 {
 		t.Errorf("failures = %d, want 0 — cancelled tasks must not count as failures", failures)
 	}
@@ -354,7 +359,7 @@ func TestRunBatchParallel_CancelledBeforeStart(t *testing.T) {
 func TestRunBatchParallel_CancelMidBatch(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	logger := log.New(io.Discard, "", 0)
-	tasks := makeTasks(t, src, 20)
+	tasks := makeTasks(t, src, dst, 20)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Unbuffered: every event send blocks until received, so cancel() is
@@ -374,7 +379,7 @@ func TestRunBatchParallel_CancelMidBatch(t *testing.T) {
 		doneCh <- n
 	}()
 
-	failures := RunBatchParallel(ctx, tasks, dst, logger, false, 1, events)
+	failures := RunBatchParallel(ctx, tasks, logger, false, 1, events)
 	done := <-doneCh
 
 	if failures != 0 {
@@ -398,14 +403,14 @@ func TestRunBatch_ContinuesAfterError(t *testing.T) {
 	os.WriteFile(lastFile, []byte("data"), 0644)
 
 	tasks := []Task{
-		{Src: scan.FileInfo{AbsPath: "/nonexistent.NEF", RelPath: "bad.NEF", Size: 100, ModTime: modtime}, DstRelPath: "photos/2026-03-25/bad.NEF"},
-		{Src: scan.FileInfo{AbsPath: lastFile, RelPath: "last.NEF", Size: 4, ModTime: modtime}, DstRelPath: "photos/2026-03-25/last.NEF"},
+		{Src: scan.FileInfo{AbsPath: "/nonexistent.NEF", RelPath: "bad.NEF", Size: 100, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/bad.NEF"},
+		{Src: scan.FileInfo{AbsPath: lastFile, RelPath: "last.NEF", Size: 4, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/last.NEF"},
 	}
 
-	RunBatch(tasks, dst, logger, false)
+	RunBatch(tasks, logger, false)
 
 	// last.NEF should have been copied despite the earlier error.
-	if _, err := os.Stat(filepath.Join(dst, "photos/2026-03-25/last.NEF")); err != nil {
+	if _, err := os.Stat(filepath.Join(dst, "2026-03-25/last.NEF")); err != nil {
 		t.Error("batch stopped after error — last file was not copied")
 	}
 }

@@ -69,36 +69,45 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 	exts := cfg.NormalisedExtensions()
 
 	sourceAvail := isDir(cfg.Source)
-	ssdAvail := isDir(cfg.SSD)
-	nasAvail := cfg.NAS != "" && isDir(cfg.NAS)
+	ssdPhotosAvail := config.RootAvailable(cfg.SSDPhotos)
+	ssdVideosAvail := config.RootAvailable(cfg.SSDVideos)
+	nasPhotosAvail := config.RootAvailable(cfg.NASPhotos)
+	nasVideosAvail := config.RootAvailable(cfg.NASVideos)
 
-	if !sourceAvail && !ssdAvail {
+	if !sourceAvail && !ssdPhotosAvail && !ssdVideosAvail {
 		return fmt.Errorf("neither camera nor SSD is available — nothing to verify")
 	}
+
+	// Destination indices, one per category root (shared when merged).
+	ssdPhotoFiles, ssdVideoFiles := scan.WalkDual(cfg.SSDPhotos, cfg.SSDVideos, exts)
+	nasPhotoFiles, nasVideoFiles := scan.WalkDual(cfg.NASPhotos, cfg.NASVideos, exts)
+	ssdIndex := map[string]map[string]scan.FileInfo{
+		"photos": scan.IndexByRelPath(ssdPhotoFiles),
+		"videos": scan.IndexByRelPath(ssdVideoFiles),
+	}
+	nasIndex := map[string]map[string]scan.FileInfo{
+		"photos": scan.IndexByRelPath(nasPhotoFiles),
+		"videos": scan.IndexByRelPath(nasVideoFiles),
+	}
+	ssdCatAvail := map[string]bool{"photos": ssdPhotosAvail, "videos": ssdVideosAvail}
+	nasCatAvail := map[string]bool{"photos": nasPhotosAvail, "videos": nasVideosAvail}
 
 	var authorityFiles []scan.FileInfo
 	var err error
 	if sourceAvail {
 		authorityFiles, err = scan.Walk(cfg.Source, exts)
+		if err != nil {
+			return err
+		}
 	} else {
 		if progressOut != nil {
 			ui.Yellow.Fprintln(progressOut, "  Camera not available — verifying SSD vs NAS only.")
 		}
-		authorityFiles, err = scan.Walk(cfg.SSD, exts)
-	}
-	if err != nil {
-		return err
-	}
-
-	ssdIndex := map[string]scan.FileInfo{}
-	if ssdAvail {
-		ssdFiles, _ := scan.Walk(cfg.SSD, exts)
-		ssdIndex = scan.IndexByRelPath(ssdFiles)
-	}
-	nasIndex := map[string]scan.FileInfo{}
-	if nasAvail {
-		nasFiles, _ := scan.Walk(cfg.NAS, exts)
-		nasIndex = scan.IndexByRelPath(nasFiles)
+		if cfg.SSDMerged() {
+			authorityFiles = ssdPhotoFiles
+		} else {
+			authorityFiles = append(append([]scan.FileInfo{}, ssdPhotoFiles...), ssdVideoFiles...)
+		}
 	}
 
 	if progressOut != nil {
@@ -126,8 +135,8 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 				logger.Printf("ERROR camera hash %s: %v", f.RelPath, err)
 			}
 		}
-		if ssdAvail {
-			if ssd, ok := ssdIndex[f.DestKey(cat)]; ok {
+		if ssdCatAvail[cat] {
+			if ssd, ok := ssdIndex[cat][f.DestKey()]; ok {
 				ssdHash, err = hash(ssd.AbsPath, f.RelPath, "ssd")
 				if err != nil {
 					res.Issues = append(res.Issues, fmt.Sprintf("SSD read error: %v", err))
@@ -137,8 +146,8 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 				res.Issues = append(res.Issues, "missing from SSD")
 			}
 		}
-		if nasAvail {
-			if nas, ok := nasIndex[f.DestKey(cat)]; ok {
+		if nasCatAvail[cat] {
+			if nas, ok := nasIndex[cat][f.DestKey()]; ok {
 				nasHash, err = hash(nas.AbsPath, f.RelPath, "nas")
 				if err != nil {
 					res.Issues = append(res.Issues, fmt.Sprintf("NAS read error: %v", err))

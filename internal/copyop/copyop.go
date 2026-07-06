@@ -43,16 +43,19 @@ func safeCreate(dstPath string) (*os.File, string, error) {
 	return nil, "", fmt.Errorf("cannot find free filename for %q after 9999 attempts", dstPath)
 }
 
-// Task describes one file to copy: the source file and where it ends up on the destination.
+// Task describes one file to copy: the source file, the destination root for
+// its category (photos or videos may live in different directories), and the
+// date-based relative path under that root.
 type Task struct {
 	Src        scan.FileInfo
-	DstRelPath string // e.g. "photos/2026-03-24/DSC_0001.NEF"
+	DstRoot    string // e.g. "/mnt/ssd/Photos"
+	DstRelPath string // e.g. "2026/2026-03/2026-03-24/DSC_0001.NEF"
 }
 
 // setup opens source and destination and returns a progress writer.
 // On error the destination file is cleaned up by the caller.
-func setup(t Task, dstRoot string) (src, dst *os.File, dstPath string, pw *ui.ProgressWriter, err error) {
-	intendedPath := filepath.Join(dstRoot, t.DstRelPath)
+func setup(t Task) (src, dst *os.File, dstPath string, pw *ui.ProgressWriter, err error) {
+	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
 	if err = os.MkdirAll(filepath.Dir(intendedPath), 0755); err != nil {
 		err = fmt.Errorf("mkdir %q: %w", filepath.Dir(intendedPath), err)
 		return
@@ -73,9 +76,9 @@ func setup(t Task, dstRoot string) (src, dst *os.File, dstPath string, pw *ui.Pr
 	return
 }
 
-func logCollision(t Task, dstRoot, intendedPath, dstPath string, logger *log.Logger) {
+func logCollision(t Task, intendedPath, dstPath string, logger *log.Logger) {
 	if dstPath != intendedPath {
-		savedRel, _ := filepath.Rel(dstRoot, dstPath)
+		savedRel, _ := filepath.Rel(t.DstRoot, dstPath)
 		ui.Yellow.Printf("\n  ⚠️  COLLISION: %s already existed — saved as %s\n", t.DstRelPath, savedRel)
 		logger.Printf("COLLISION  original=%s  saved=%s", t.DstRelPath, savedRel)
 	}
@@ -85,9 +88,9 @@ func logCollision(t Task, dstRoot, intendedPath, dstPath string, logger *log.Log
 // Used for Camera→SSD where the SSD is the source of truth.
 // Source is opened read-only. On failure the partial destination file is removed.
 // Modtime is preserved so downstream date-based comparisons remain correct.
-func CopyAndVerify(t Task, dstRoot string, logger *log.Logger) error {
-	intendedPath := filepath.Join(dstRoot, t.DstRelPath)
-	src, dst, dstPath, pw, err := setup(t, dstRoot)
+func CopyAndVerify(t Task, logger *log.Logger) error {
+	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
+	src, dst, dstPath, pw, err := setup(t)
 	if err != nil {
 		return err
 	}
@@ -128,7 +131,7 @@ func CopyAndVerify(t Task, dstRoot string, logger *log.Logger) error {
 	ui.Green.Println("✅")
 	logger.Printf("COPY OK (verified)  %-50s  sha256=%s", dstPath, dstHash)
 
-	logCollision(t, dstRoot, intendedPath, dstPath, logger)
+	logCollision(t, intendedPath, dstPath, logger)
 	return nil
 }
 
@@ -136,9 +139,9 @@ func CopyAndVerify(t Task, dstRoot string, logger *log.Logger) error {
 // Used for SSD→NAS where speed matters; the verify command checks integrity separately.
 // Source is opened read-only. On failure the partial destination file is removed.
 // Modtime is preserved so downstream date-based comparisons remain correct.
-func Copy(t Task, dstRoot string, logger *log.Logger) error {
-	intendedPath := filepath.Join(dstRoot, t.DstRelPath)
-	src, dst, dstPath, pw, err := setup(t, dstRoot)
+func Copy(t Task, logger *log.Logger) error {
+	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
+	src, dst, dstPath, pw, err := setup(t)
 	if err != nil {
 		return err
 	}
@@ -158,7 +161,7 @@ func Copy(t Task, dstRoot string, logger *log.Logger) error {
 	ui.Green.Println("  ✅")
 	logger.Printf("COPY OK  %s", dstPath)
 
-	logCollision(t, dstRoot, intendedPath, dstPath, logger)
+	logCollision(t, intendedPath, dstPath, logger)
 	return nil
 }
 
@@ -195,11 +198,11 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// copyWithWriter copies a single task to dstRoot, writing progress bytes to w.
-// If doVerify is true the destination is SHA256-checked against the source.
-// On failure the partial destination file is removed.
-func copyWithWriter(t Task, dstRoot string, doVerify bool, logger *log.Logger, w io.Writer) error {
-	intendedPath := filepath.Join(dstRoot, t.DstRelPath)
+// copyWithWriter copies a single task to its destination root, writing
+// progress bytes to w. If doVerify is true the destination is SHA256-checked
+// against the source. On failure the partial destination file is removed.
+func copyWithWriter(t Task, doVerify bool, logger *log.Logger, w io.Writer) error {
+	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
 	if err := os.MkdirAll(filepath.Dir(intendedPath), 0755); err != nil {
 		return fmt.Errorf("mkdir %q: %w", filepath.Dir(intendedPath), err)
 	}
@@ -248,7 +251,7 @@ func copyWithWriter(t Task, dstRoot string, doVerify bool, logger *log.Logger, w
 	_ = os.Chtimes(dstPath, t.Src.ModTime, t.Src.ModTime)
 
 	if dstPath != intendedPath {
-		savedRel, _ := filepath.Rel(dstRoot, dstPath)
+		savedRel, _ := filepath.Rel(t.DstRoot, dstPath)
 		logger.Printf("COLLISION  original=%s  saved=%s", t.DstRelPath, savedRel)
 	}
 	return nil
@@ -261,7 +264,7 @@ func copyWithWriter(t Task, dstRoot string, doVerify bool, logger *log.Logger, w
 // Cancelling ctx stops gracefully: files already being copied run to
 // completion (so the destination never holds partial files), but queued
 // tasks are not started. Cancelled tasks are not counted as failures.
-func RunBatchParallel(ctx context.Context, tasks []Task, dstRoot string, logger *log.Logger, doVerify bool, workers int, events chan<- FileProgress) int {
+func RunBatchParallel(ctx context.Context, tasks []Task, logger *log.Logger, doVerify bool, workers int, events chan<- FileProgress) int {
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -289,7 +292,7 @@ loop:
 			defer func() { <-sem }()
 
 			pw := &progressWriter{relPath: t.DstRelPath, size: t.Src.Size, events: events}
-			err := copyWithWriter(t, dstRoot, doVerify, logger, pw)
+			err := copyWithWriter(t, doVerify, logger, pw)
 			events <- FileProgress{RelPath: t.DstRelPath, Written: t.Src.Size, Size: t.Src.Size, Done: true, Err: err}
 			if err != nil {
 				logger.Printf("ERROR  %v", err)
@@ -305,10 +308,10 @@ loop:
 	return errCount
 }
 
-// RunBatch copies a slice of tasks to dstRoot using CopyAndVerify if verify is true,
+// RunBatch copies a slice of tasks using CopyAndVerify if verify is true,
 // else the faster Copy. Errors are logged and counted; the batch continues on failure.
 // Returns the number of files that failed.
-func RunBatch(tasks []Task, dstRoot string, logger *log.Logger, verify bool) int {
+func RunBatch(tasks []Task, logger *log.Logger, verify bool) int {
 	copyFn := Copy
 	if verify {
 		copyFn = CopyAndVerify
@@ -316,11 +319,59 @@ func RunBatch(tasks []Task, dstRoot string, logger *log.Logger, verify bool) int
 	errCount := 0
 	for i, t := range tasks {
 		fmt.Printf("\n  [%d/%d] %s\n", i+1, len(tasks), t.DstRelPath)
-		if err := copyFn(t, dstRoot, logger); err != nil {
+		if err := copyFn(t, logger); err != nil {
 			ui.Red.Printf("  ERROR: %v\n", err)
 			logger.Printf("ERROR  %v", err)
 			errCount++
 		}
 	}
 	return errCount
+}
+
+// CheckSpace returns an error if any destination filesystem lacks free space
+// for its share of the tasks. Roots that resolve to the same filesystem are
+// checked against their combined size so a shared disk is not double-counted.
+// Roots whose free space cannot be determined are allowed to proceed.
+func CheckSpace(tasks []Task) error {
+	needPerRoot := map[string]int64{}
+	for _, t := range tasks {
+		needPerRoot[t.DstRoot] += t.Src.Size
+	}
+
+	type group struct {
+		need  int64
+		free  int64
+		roots []string
+	}
+	groups := map[string]*group{}
+	for root, need := range needPerRoot {
+		// The root itself may not exist yet (created on first copy) — fall
+		// back to its parent for space information.
+		free, err := ui.FreeSpace(root)
+		if err != nil {
+			root = filepath.Dir(root)
+			if free, err = ui.FreeSpace(root); err != nil {
+				continue
+			}
+		}
+		key := root // fall back to per-root checking
+		if id, err := ui.FilesystemID(root); err == nil {
+			key = fmt.Sprintf("fs:%d", id)
+		}
+		g := groups[key]
+		if g == nil {
+			g = &group{free: free}
+			groups[key] = g
+		}
+		g.need += need
+		g.roots = append(g.roots, root)
+	}
+
+	for _, g := range groups {
+		if g.need > g.free {
+			return fmt.Errorf("not enough space on %s: need %s but only %s free",
+				strings.Join(g.roots, ", "), ui.FormatBytes(g.need), ui.FormatBytes(g.free))
+		}
+	}
+	return nil
 }

@@ -106,16 +106,21 @@ func (m *Model) renderHeaderRow() string {
 	return tabs + strings.Repeat(" ", gap) + dev
 }
 
-// renderDeviceHeader renders the compact device status: ✔ Camera · ✔ SSD 412 GB · ✘ NAS
+// renderDeviceHeader renders the compact device status: ✔ Camera · ✔ SSD 412 GB · ✘ NAS.
+// Devices with split photo/video roots get a partial marker (⚠ SSD ✔P ✘V)
+// when only one root is mounted.
 func (m *Model) renderDeviceHeader() string {
 	if m.status == nil {
 		return ""
 	}
 	r := m.status
 	sep := styleDim.Render(" · ")
-	return deviceBadge("Camera", r.SourceAvail, r.SourceFree) + sep +
-		deviceBadge("SSD", r.SSDAvail, r.SSDFree) + sep +
-		deviceBadge("NAS", r.NASAvail, r.NASFree) + " "
+	out := deviceBadge("Camera", r.SourceAvail, r.SourceFree) + sep +
+		dualBadge("SSD", r.SSDPhotosAvail, r.SSDVideosAvail, r.SSDPhotosFree, r.SSDVideosFree)
+	if m.cfg.NASConfigured() {
+		out += sep + dualBadge("NAS", r.NASPhotosAvail, r.NASVideosAvail, r.NASPhotosFree, r.NASVideosFree)
+	}
+	return out + " "
 }
 
 func deviceBadge(name string, avail bool, free int64) string {
@@ -127,6 +132,42 @@ func deviceBadge(name string, avail bool, free int64) string {
 		s += styleDim.Render(" " + fmtBytes(free))
 	}
 	return s
+}
+
+// dualBadge renders a device with photos/videos roots: a single badge when
+// both roots share availability, a warning with per-root markers otherwise.
+func dualBadge(name string, pAvail, vAvail bool, pFree, vFree int64) string {
+	if pAvail == vAvail {
+		return deviceBadge(name, pAvail, minFree(pFree, vFree))
+	}
+	p, v := styleErr.Render("✘P"), styleErr.Render("✘V")
+	free := vFree
+	if pAvail {
+		p = styleOK.Render("✔P")
+		free = pFree
+	}
+	if vAvail {
+		v = styleOK.Render("✔V")
+	}
+	s := styleWarn.Render("⚠ "+name) + " " + p + v
+	if free > 0 {
+		s += styleDim.Render(" " + fmtBytes(free))
+	}
+	return s
+}
+
+// minFree returns the smaller known free-space value (unavailable roots are -1).
+func minFree(a, b int64) int64 {
+	switch {
+	case a < 0:
+		return b
+	case b < 0:
+		return a
+	case a < b:
+		return a
+	default:
+		return b
+	}
 }
 
 func (m *Model) renderStatusBar() string {
@@ -239,7 +280,7 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 			ssdIcon = styleOK.Render("✓SSD")
 		}
 		nasIcon := ""
-		if m.status != nil && m.status.NASAvail {
+		if m.status != nil && m.status.NASAvail() {
 			if onNAS {
 				nasIcon = " " + styleOK.Render("✓NAS")
 			} else {
@@ -278,8 +319,9 @@ func (m *Model) fileStatus(f scan.FileInfo) (onSSD, onNAS bool) {
 	if m.status == nil {
 		return
 	}
-	key := f.DestKey(m.cfg.Category(f.RelPath))
-	return m.ssdKeys[key], m.nasKeys[key]
+	cat := m.cfg.Category(f.RelPath)
+	key := f.DestKey()
+	return m.ssdKeys[cat][key], m.nasKeys[cat][key]
 }
 
 func (m *Model) renderDetailPanel(w, h int) string {

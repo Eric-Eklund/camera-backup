@@ -10,7 +10,7 @@ Built in Go. Never deletes or overwrites source files.
 
 ### Daily backup (e.g. on vacation without reliable network)
 
-1. Connect camera via USB-C (mounts as a drive, e.g. `G:\`)
+1. Connect camera via USB-C (mounts as a drive, e.g. `/media/eric/NIKON`)
 2. `camera-backup status` — see what needs copying and verify there is enough space
 3. `camera-backup copy` — copies camera → SSD with SHA256 verification, then asks whether to continue to NAS (disconnect the camera first)
 4. `camera-backup sync` — copies SSD → NAS when network is available (videos first); run overnight if needed
@@ -43,9 +43,11 @@ Quick check — compares by filename and file size. Shows how much data needs to
 ```
   Devices
   ────────────────────────────────────────────────────────
-  ✅  Camera  E:\                      (no free space info)
-  ✅  SSD     D:\CameraBackup          210.4 GB free
-  ✅  NAS     Y:\CameraBackup           1.2 TB free
+  ✅  Camera      /media/eric/NIKON    (no free space info)
+  ✅  SSD photos  /mnt/ssd/Photos      210.4 GB free
+  ✅  SSD videos  /mnt/ssd/Videos      210.4 GB free
+  ✅  NAS photos  /mnt/nas/Photos       1.2 TB free
+  ✅  NAS videos  /mnt/nas/Videos       1.2 TB free
 
   Summary
   ────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verificati
 
   Copying 13 file(s) to SSD...
 
-  [1/13] photos/2026-03-24/DSC_0142.NEF
+  [1/13] 2026/2026-03/2026-03-24/DSC_0142.NEF
   DSC_0142.NEF               45.2 MB   89.3 MB/s  [████████████████████]  100.0%
     Verifying DSC_0142.NEF              ✅
   ...
@@ -135,7 +137,11 @@ copy/sync/verify with live parallel progress bars.
 - `j/k` or arrows navigate, `Enter` expands groups or previews a file
 - `space` selects files (or whole groups), `a` selects all — `y` then copies
   only the selection (or everything when nothing is selected)
-- `g` opens a thumbnail grid for a date group, `v` runs verify, `q` quits
+- `g` opens a scrollable thumbnail grid for a date group — thumbnails load as
+  you scroll, and `y` starts a copy directly from the grid
+- Copies show per-file progress bars plus overall throughput and ETA;
+  `q`/`esc` cancels gracefully (files in progress finish, the queue stops)
+- `?` opens a help screen with all keybindings, `v` runs verify, `q` quits
 - Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
 - Devices are watched — plugging in the SD card refreshes the view automatically
@@ -147,18 +153,27 @@ copy/sync/verify with live parallel progress bars.
 Place `config.toml` next to the binary, or pass `--config <path>`.
 
 ```toml
-source = "E:\\"               # Camera / memory card (mounted drive)
-ssd    = "D:\\CameraBackup"   # Local SSD destination
-nas    = "Y:\\CameraBackup"   # NAS mapped via SMB (or WireGuard VPN)
+source     = "/media/eric/NIKON"      # Camera / memory card (mount point)
+ssd_photos = "/mnt/ssd/Photos"        # SSD destination for photos
+ssd_videos = "/mnt/ssd/Videos"        # SSD destination for videos
+nas_photos = "/mnt/nas/Photos"        # NAS destinations (optional, set both or neither)
+nas_videos = "/mnt/nas/Videos"
 
 file_extensions  = [".MOV", ".NEF", ".JPG", ".MP4"]
-video_extensions = [".MOV", ".MP4"]   # sorted into videos/ on destination
-                                       # everything else goes into photos/
+video_extensions = [".MOV", ".MP4"]   # these route to the videos destination
+                                       # everything else goes to photos
 
 # Parallel copy workers used by the TUI (optional)
 ssd_workers = 3               # camera → SSD (default 3)
 nas_workers = 1               # SSD → NAS   (default 1)
 ```
+
+Photos and videos each have their own destination directory per device. Point
+both keys at the **same** path to merge them into one tree. A file's category
+is always decided by its extension, so a merged SSD can still be split onto
+separate NAS directories (and vice versa). If one category's directory is
+unavailable (e.g. the video disk isn't mounted), the other category is still
+copied and the skipped files are reported.
 
 Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all match.
 
@@ -166,23 +181,16 @@ Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all 
 
 ## Directory structure on destination
 
-Files are organised by category and shoot date (taken from the file's modification time) in a year → month → day hierarchy. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
+Files are organised by shoot date (taken from the file's modification time) in a year → month → day hierarchy directly under each category's destination directory. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
 
 ```
-D:\CameraBackup\
-  photos\
-    2026\
-      2026-03\
-        2026-03-24\
-          DSC_0001.NEF
-          DSC_0001.JPG
-          DSC_0002.NEF
-  videos\
-    2026\
-      2026-03\
-        2026-03-24\
-          VIDEO001.MOV
-          VIDEO002.MP4
+/mnt/ssd/Photos/                      /mnt/ssd/Videos/
+  2026/                                 2026/
+    2026-03/                              2026-03/
+      2026-03-24/                           2026-03-24/
+        DSC_0001.NEF                          VIDEO001.MOV
+        DSC_0001.JPG                          VIDEO002.MP4
+        DSC_0002.NEF
 ```
 
 Both SSD and NAS use the same structure. The date folder prevents filename collisions across sessions (Nikon resets to `DSC_0001` when a new card is formatted).
@@ -229,15 +237,15 @@ rm -rf testdata/camera testdata/ssd testdata/nas && go run testdata/make_testdat
 
 ## Installation
 
-Requires Go 1.22+.
+Requires Go 1.26+. Linux only.
 
 ```bash
 git clone https://github.com/Eric-Eklund/camera-backup
 cd camera-backup
-GOOS=windows GOARCH=amd64 go build -o camera-backup.exe ./cmd/camera-backup
+go build -o camera-backup ./cmd/camera-backup
 ```
 
-Copy `camera-backup.exe` and `config.toml` to a folder on your laptop. Run from PowerShell or Windows Terminal.
+Copy the `camera-backup` binary and `config.toml` to a directory of your choice and run from any terminal. For RAW (.NEF) previews in the TUI, install `exiftool`.
 
 ---
 
