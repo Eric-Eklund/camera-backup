@@ -221,6 +221,38 @@ func TestMissingByRelPath_IncludeDifferentSize(t *testing.T) {
 	}
 }
 
+func TestMissingByRelPath_SkipWhenCollisionCopyExists(t *testing.T) {
+	// A previous run found a stray same-name file on the NAS (e.g. a partial
+	// copy left by a dropped connection) and saved the source as _1.
+	// Re-running must NOT copy it again as _2.
+	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	src := []scan.FileInfo{fi("photos/2026-03-25/DSC_0001.NEF", 2048, modtime)}
+	dstIndex := map[string]scan.FileInfo{
+		"photos/2026-03-25/dsc_0001.nef":   fi("photos/2026-03-25/DSC_0001.NEF", 1024, modtime),
+		"photos/2026-03-25/dsc_0001_1.nef": fi("photos/2026-03-25/DSC_0001_1.NEF", 2048, modtime),
+	}
+
+	missing := scan.MissingByRelPath(src, dstIndex)
+	if len(missing) != 0 {
+		t.Errorf("len = %d, want 0 (collision copy _1 already has same size)", len(missing))
+	}
+}
+
+func TestMissingByRelPath_IncludeWhenCollisionCopyDiffers(t *testing.T) {
+	// _1 exists but with yet another size — the source file is still missing.
+	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	src := []scan.FileInfo{fi("photos/2026-03-25/DSC_0001.NEF", 4096, modtime)}
+	dstIndex := map[string]scan.FileInfo{
+		"photos/2026-03-25/dsc_0001.nef":   fi("photos/2026-03-25/DSC_0001.NEF", 1024, modtime),
+		"photos/2026-03-25/dsc_0001_1.nef": fi("photos/2026-03-25/DSC_0001_1.NEF", 2048, modtime),
+	}
+
+	missing := scan.MissingByRelPath(src, dstIndex)
+	if len(missing) != 1 {
+		t.Errorf("len = %d, want 1 (no collision copy matches the size)", len(missing))
+	}
+}
+
 // ── SplitByCategory / WalkDual ────────────────────────────────────────────────
 
 func TestSplitByCategory(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/fatih/color"
 )
@@ -164,8 +163,8 @@ func (pw *ProgressWriter) render() {
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 
 	label := pw.label
-	if utf8.RuneCountInString(label) > 28 {
-		label = "…" + label[len(label)-27:]
+	if runes := []rune(label); len(runes) > 28 {
+		label = "…" + string(runes[len(runes)-27:])
 	}
 
 	fmt.Fprintf(pw.out, "\r  %-28s  %8s  %9s/s  [%s]  %5.1f%%",

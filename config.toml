@@ -1,6 +1,11 @@
-source = "/media/eric/NIKON"        # Camera / memory card (mount point)
-ssd    = "/mnt/ssd/CameraBackup"    # Local SSD destination
-nas    = "/mnt/nas/CameraBackup"    # NAS mounted via SMB/NFS (or WireGuard VPN)
+source = "/media/eric/NIKON"                    # Camera / memory card (mount point)
+
+# Destination roots — one per category. Point photos and videos at the same
+# path to merge them into one tree.
+ssd_photos = "/mnt/ssd/CameraBackup/photos"     # Local SSD destination for photos
+ssd_videos = "/mnt/ssd/CameraBackup/videos"     # Local SSD destination for videos
+nas_photos = "/mnt/nas/CameraBackup/photos"     # NAS photos (SMB/NFS, or WireGuard VPN)
+nas_videos = "/mnt/nas/CameraBackup/videos"     # NAS videos
 
 file_extensions = [
   ".MOV",

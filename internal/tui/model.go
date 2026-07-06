@@ -1081,7 +1081,14 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		)
 
 	default:
-		m.statusMsg = "Nothing to do — no source device available."
+		switch {
+		case r.SourceAvail && !r.SSDAvail():
+			m.statusMsg = "Camera found but no SSD root is mounted — cannot copy."
+		case !r.SourceAvail && r.SSDAvail() && !r.NASAvail():
+			m.statusMsg = "No camera, and NAS is not available — nothing to sync."
+		default:
+			m.statusMsg = "Nothing to do — no source device available."
+		}
 		return m, nil
 	}
 }
@@ -1262,7 +1269,7 @@ func (m *Model) renderLoading() string {
 // renderConfirm renders the Phase 1 done / confirm Phase 2 screen.
 func (m *Model) renderConfirm() string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\n  Copied %d files to SSD.\n", m.copyTotal))
+	sb.WriteString(fmt.Sprintf("\n  Copied %d of %d files to SSD.\n", m.copyTotal-m.failures, m.copyTotal))
 	if m.failures > 0 {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("  %d files failed.", m.failures)) + "\n")
 	}
