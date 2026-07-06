@@ -176,13 +176,23 @@ func collisionCopyExists(key string, size int64, dstIndex map[string]FileInfo) b
 
 // MissingByRelPath returns files from src absent in dstIndex (keyed by lowercased RelPath).
 // Used for SSD→NAS where both sides share the same category/date/filename structure.
+//
+// Like MissingFromDest, a size mismatch under the original name is resolved by
+// probing the _N collision variants — otherwise a stray destination file (e.g.
+// a partial copy left behind by a dropped connection) would cause the source
+// to be recopied as _2, _3, … on every run.
 func MissingByRelPath(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
 	var out []FileInfo
 	for _, f := range src {
-		existing, found := dstIndex[strings.ToLower(f.RelPath)]
-		if !found || existing.Size != f.Size {
-			out = append(out, f)
+		key := strings.ToLower(f.RelPath)
+		existing, found := dstIndex[key]
+		if found && existing.Size == f.Size {
+			continue
 		}
+		if found && collisionCopyExists(key, f.Size, dstIndex) {
+			continue
+		}
+		out = append(out, f)
 	}
 	return out
 }

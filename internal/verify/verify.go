@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Eric-Eklund/camera-backup/internal/checksum"
 	"github.com/Eric-Eklund/camera-backup/internal/config"
@@ -136,7 +137,7 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 			}
 		}
 		if ssdCatAvail[cat] {
-			if ssd, ok := ssdIndex[cat][f.DestKey()]; ok {
+			if ssd, ok := findBySize(ssdIndex[cat], f.DestKey(), f.Size); ok {
 				ssdHash, err = hash(ssd.AbsPath, f.RelPath, "ssd")
 				if err != nil {
 					res.Issues = append(res.Issues, fmt.Sprintf("SSD read error: %v", err))
@@ -147,7 +148,7 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 			}
 		}
 		if nasCatAvail[cat] {
-			if nas, ok := nasIndex[cat][f.DestKey()]; ok {
+			if nas, ok := findBySize(nasIndex[cat], f.DestKey(), f.Size); ok {
 				nasHash, err = hash(nas.AbsPath, f.RelPath, "nas")
 				if err != nil {
 					res.Issues = append(res.Issues, fmt.Sprintf("NAS read error: %v", err))
@@ -177,6 +178,29 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 		}
 	}
 	return nil
+}
+
+// findBySize returns the destination entry for key whose size matches size:
+// the original name first, then the _N collision variants that safeCreate
+// allocates. Variants are contiguous, so probing stops at the first gap.
+// A same-size entry can still be corrupt — the caller compares hashes.
+// found is false when no entry of the wanted size exists (missing, or only a
+// stray/partial file of a different size — which a copy run resolves as _N).
+func findBySize(index map[string]scan.FileInfo, key string, size int64) (scan.FileInfo, bool) {
+	if e, ok := index[key]; ok && e.Size == size {
+		return e, true
+	}
+	ext := filepath.Ext(key)
+	stem := strings.TrimSuffix(key, ext)
+	for i := 1; ; i++ {
+		e, ok := index[fmt.Sprintf("%s_%d%s", stem, i, ext)]
+		if !ok {
+			return scan.FileInfo{}, false
+		}
+		if e.Size == size {
+			return e, true
+		}
+	}
 }
 
 func hashWithProgress(out io.Writer, absPath, relPath, location string) (string, error) {

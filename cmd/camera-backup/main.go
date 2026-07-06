@@ -63,25 +63,41 @@ Typical workflow:
 	}
 }
 
-// initLogger creates a timestamped log file in logs/ next to the binary.
+// initLogger creates a timestamped log file in logs/ next to the binary,
+// falling back to ~/.local/state/camera-backup/logs when the binary's
+// directory is not writable (e.g. installed in /usr/local/bin).
 func initLogger() (*log.Logger, func(), error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, nil, err
 	}
-	logsDir := filepath.Join(filepath.Dir(exe), "logs")
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		return nil, nil, err
-	}
 	stamp := time.Now().Format("2006-01-02_15-04-05")
-	logPath := filepath.Join(logsDir, stamp+".log")
-	f, err := os.Create(logPath)
+	f, logPath, err := createLogFile(filepath.Join(filepath.Dir(exe), "logs"), stamp)
 	if err != nil {
-		return nil, nil, err
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return nil, nil, err
+		}
+		stateDir := filepath.Join(home, ".local", "state", "camera-backup", "logs")
+		if f, logPath, err = createLogFile(stateDir, stamp); err != nil {
+			return nil, nil, err
+		}
 	}
 	logger := log.New(f, "", log.LstdFlags)
 	logger.Printf("camera-backup started — log: %s", logPath)
 	return logger, func() { f.Close() }, nil
+}
+
+func createLogFile(dir, stamp string) (*os.File, string, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, "", err
+	}
+	logPath := filepath.Join(dir, stamp+".log")
+	f, err := os.Create(logPath)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, logPath, nil
 }
 
 func mustLoadConfig(configPath string) (*config.Config, error) {

@@ -95,19 +95,26 @@ func CopyAndVerify(t Task, logger *log.Logger) error {
 		return err
 	}
 	defer src.Close()
-	defer dst.Close()
 
 	buf := make([]byte, copyBufSize)
 	if _, err := io.CopyBuffer(io.MultiWriter(dst, pw), src, buf); err != nil {
 		pw.Done()
+		dst.Close()
 		os.Remove(dstPath)
 		return fmt.Errorf("copying %q: %w", t.Src.RelPath, err)
 	}
 	pw.Done()
 
 	if err := dst.Sync(); err != nil {
+		dst.Close()
 		os.Remove(dstPath)
 		return fmt.Errorf("sync %q: %w", dstPath, err)
+	}
+	// Close errors surface deferred write failures (common on network mounts) —
+	// a copy is not OK until the file is safely closed.
+	if err := dst.Close(); err != nil {
+		os.Remove(dstPath)
+		return fmt.Errorf("close %q: %w", dstPath, err)
 	}
 
 	_ = os.Chtimes(dstPath, t.Src.ModTime, t.Src.ModTime)
@@ -146,15 +153,22 @@ func Copy(t Task, logger *log.Logger) error {
 		return err
 	}
 	defer src.Close()
-	defer dst.Close()
 
 	buf := make([]byte, copyBufSize)
 	if _, err := io.CopyBuffer(io.MultiWriter(dst, pw), src, buf); err != nil {
 		pw.Done()
+		dst.Close()
 		os.Remove(dstPath)
 		return fmt.Errorf("copying %q: %w", t.Src.RelPath, err)
 	}
 	pw.Done()
+
+	// This fast path skips Sync, so Close is the only place deferred write
+	// failures (common on NAS mounts) surface — never report OK past it.
+	if err := dst.Close(); err != nil {
+		os.Remove(dstPath)
+		return fmt.Errorf("close %q: %w", dstPath, err)
+	}
 
 	_ = os.Chtimes(dstPath, t.Src.ModTime, t.Src.ModTime)
 
@@ -216,19 +230,29 @@ func copyWithWriter(t Task, doVerify bool, logger *log.Logger, w io.Writer) erro
 	if err != nil {
 		return fmt.Errorf("create dest %q: %w", intendedPath, err)
 	}
-	defer dst.Close()
 
 	buf := make([]byte, copyBufSize)
 	if _, err := io.CopyBuffer(io.MultiWriter(dst, w), src, buf); err != nil {
+		dst.Close()
 		os.Remove(dstPath)
 		return fmt.Errorf("copying %q: %w", t.Src.RelPath, err)
 	}
 
 	if doVerify {
 		if err := dst.Sync(); err != nil {
+			dst.Close()
 			os.Remove(dstPath)
 			return fmt.Errorf("sync %q: %w", dstPath, err)
 		}
+	}
+	// Close errors surface deferred write failures (common on network mounts) —
+	// a copy is not OK until the file is safely closed.
+	if err := dst.Close(); err != nil {
+		os.Remove(dstPath)
+		return fmt.Errorf("close %q: %w", dstPath, err)
+	}
+
+	if doVerify {
 		srcHash, err := checksum.File(t.Src.AbsPath)
 		if err != nil {
 			os.Remove(dstPath)
