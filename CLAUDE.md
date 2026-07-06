@@ -50,10 +50,24 @@ Five subcommands (Cobra CLI):
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher |
 | `internal/ui` | Terminal colors, progress bar, `Prompt()`, `AskYesNo()`, `FreeSpace()` |
 
+### Destination roots
+
+Each device has **two destination roots** — one for photos, one for videos
+(`ssd_photos`/`ssd_videos`/`nas_photos`/`nas_videos` in config.toml). Pointing
+both keys at the same path merges the categories into one tree. A file's
+category is **always decided by extension** (`video_extensions`; everything
+else is photos) — never by which directory it happens to sit in — so a merged
+SSD can be split onto separate NAS roots and vice versa. `copyop.Task` carries
+its own `DstRoot`. If one category's root is unavailable, the other category is
+still copied and skipped files are reported (CLI warning / TUI `⚠ NAS ✔P✘V`
+badge + skip counts). A root "is available" when it or its parent directory
+exists (`config.RootAvailable`) — the root itself is created on first copy.
+
 ### Copy phase details
 
-Phase 1 (Camera → SSD) transforms paths: `DCIM/DSC_0001.NEF` → `photos/2026/2026-03/2026-03-25/DSC_0001.NEF`
-(year → month → day hierarchy). Phase 2 (SSD → NAS) preserves relative paths directly — no transformation.
+Phase 1 (Camera → SSD) transforms paths: `DCIM/DSC_0001.NEF` → `<ssd_photos>/2026/2026-03/2026-03-25/DSC_0001.NEF`
+(year → month → day hierarchy under the category root; `scan.FileInfo.DestRelPath()` is date-only).
+Phase 2 (SSD → NAS) preserves relative paths within each category pair — no transformation.
 
 This split lets the user disconnect and power off the camera between phases. Phase 2 is optional and skipped gracefully if NAS is unavailable. In the TUI, Phase 2 tasks are always rescanned from the SSD after Phase 1 completes — never built from camera paths.
 
@@ -65,7 +79,7 @@ Comparison uses filename + size (not hash) for speed. Collision: same name but d
 - Destination files are created with `O_EXCL` — never overwritten
 - Destination modtime is set to source modtime
 - All extension and path comparisons are lowercased
-- Free disk space is validated before any copy phase starts (CLI `checkSpace` in main.go, TUI `checkSpace` in ops.go)
+- Free disk space is validated before any copy phase starts (`copyop.CheckSpace`, shared by CLI and TUI; groups roots by filesystem so a shared disk isn't double-counted)
 
 ### TUI specifics
 

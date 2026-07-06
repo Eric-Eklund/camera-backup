@@ -2,11 +2,11 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"image"
 	"log"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,7 +17,6 @@ import (
 	"github.com/Eric-Eklund/camera-backup/internal/preview"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
-	"github.com/Eric-Eklund/camera-backup/internal/ui"
 	"github.com/Eric-Eklund/camera-backup/internal/verify"
 )
 
@@ -32,9 +31,9 @@ func statusScanCmd(cfg *config.Config, logger *log.Logger) tea.Cmd {
 // by RunBatchParallel when done) and the failure count to result. The done
 // message itself is emitted by drainProgressCmd — after every progress event
 // has been forwarded — so completion counts are never racy.
-func runBatchCmd(ctx context.Context, tasks []copyop.Task, dstRoot string, logger *log.Logger, doVerify bool, workers int, events chan<- copyop.FileProgress, result chan<- int) tea.Cmd {
+func runBatchCmd(ctx context.Context, tasks []copyop.Task, logger *log.Logger, doVerify bool, workers int, events chan<- copyop.FileProgress, result chan<- int) tea.Cmd {
 	return func() tea.Msg {
-		result <- copyop.RunBatchParallel(ctx, tasks, dstRoot, logger, doVerify, workers, events)
+		result <- copyop.RunBatchParallel(ctx, tasks, logger, doVerify, workers, events)
 		return nil
 	}
 }
@@ -43,33 +42,56 @@ func runBatchCmd(ctx context.Context, tasks []copyop.Task, dstRoot string, logge
 // from the SSD (never the camera) and includes files just copied in Phase 1.
 func preparePhase2Cmd(cfg *config.Config, logger *log.Logger) tea.Cmd {
 	return func() tea.Msg {
-		tasks, err := nasSyncTasks(cfg)
-		if err != nil {
-			logger.Printf("ERROR phase 2 scan: %v", err)
-			return phase2ReadyMsg{err: err}
+		tasks, skipped := nasSyncTasks(cfg)
+		if skipped > 0 {
+			logger.Printf("phase 2: %d files skipped — NAS category root unavailable", skipped)
 		}
-		return phase2ReadyMsg{tasks: tasks}
+		return phase2ReadyMsg{tasks: tasks, skipped: skipped}
 	}
 }
 
 // nasSyncTasks scans SSD and NAS fresh and returns the SSD→NAS copy tasks,
 // videos first (so large files are prioritised if the connection drops).
-func nasSyncTasks(cfg *config.Config) ([]copyop.Task, error) {
+// Files whose NAS category root is unavailable are counted as skipped.
+// Category is decided by extension, so a merged SSD tree can be split onto
+// separate NAS roots and vice versa.
+func nasSyncTasks(cfg *config.Config) (tasks []copyop.Task, skipped int) {
 	exts := cfg.NormalisedExtensions()
-	ssdFiles, err := scan.Walk(cfg.SSD, exts)
-	if err != nil {
-		return nil, err
-	}
-	nasFiles, _ := scan.Walk(cfg.NAS, exts)
-	nasIndex := scan.IndexByRelPath(nasFiles)
-	missing := scan.MissingByRelPath(ssdFiles, nasIndex)
+	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
 
-	tasks := make([]copyop.Task, 0, len(missing))
-	for _, f := range missing {
-		tasks = append(tasks, copyop.Task{Src: f, DstRelPath: f.RelPath})
+	ssdPhotoFiles, ssdVideoFiles := scan.WalkDual(cfg.SSDPhotos, cfg.SSDVideos, exts)
+	var ssdAll []scan.FileInfo
+	if cfg.SSDMerged() {
+		ssdAll = ssdPhotoFiles
+	} else {
+		ssdAll = append(append([]scan.FileInfo{}, ssdPhotoFiles...), ssdVideoFiles...)
 	}
-	sortVideosFirst(tasks, cfg)
-	return tasks, nil
+	photos, videos := scan.SplitByCategory(ssdAll, categoryFn)
+	nasPhotoFiles, nasVideoFiles := scan.WalkDual(cfg.NASPhotos, cfg.NASVideos, exts)
+
+	add := func(files []scan.FileInfo, cat string, nasFiles []scan.FileInfo) {
+		missing := scan.MissingByRelPath(files, scan.IndexByRelPath(nasFiles))
+		if len(missing) == 0 {
+			return
+		}
+		nasRoot := cfg.NASRoot(cat)
+		if !config.RootAvailable(nasRoot) {
+			skipped += len(missing)
+			return
+		}
+		seen := map[string]bool{}
+		for _, f := range missing {
+			key := strings.ToLower(f.RelPath)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			tasks = append(tasks, copyop.Task{Src: f, DstRoot: nasRoot, DstRelPath: f.RelPath})
+		}
+	}
+	add(videos, "videos", nasVideoFiles)
+	add(photos, "photos", nasPhotoFiles)
+	return tasks, skipped
 }
 
 func sortVideosFirst(tasks []copyop.Task, cfg *config.Config) {
@@ -77,21 +99,6 @@ func sortVideosFirst(tasks []copyop.Task, cfg *config.Config) {
 		return cfg.Category(tasks[i].Src.RelPath) == "videos" &&
 			cfg.Category(tasks[j].Src.RelPath) != "videos"
 	})
-}
-
-// checkSpace returns an error if dst lacks free space for all tasks.
-// If free space cannot be determined the copy is allowed to proceed.
-func checkSpace(dst string, tasks []copyop.Task) error {
-	needed := copyop.TotalSize(tasks)
-	free, err := ui.FreeSpace(dst)
-	if err != nil {
-		return nil
-	}
-	if needed > free {
-		return fmt.Errorf("not enough space on %s: need %s but only %s free",
-			dst, ui.FormatBytes(needed), ui.FormatBytes(free))
-	}
-	return nil
 }
 
 // verifyCmd runs the verify pass, streaming per-file results to the model
@@ -162,7 +169,7 @@ func drainProgressCmd(events <-chan copyop.FileProgress, result <-chan int, p *t
 // device paths. When a CREATE or REMOVE event is detected it sends a DeviceChangedMsg.
 func watchDevicesCmd(cfg *config.Config, p *tea.Program) tea.Cmd {
 	return func() tea.Msg {
-		dirs := uniqueDirs(cfg.Source, cfg.SSD, cfg.NAS)
+		dirs := uniqueDirs(cfg.Source, cfg.SSDPhotos, cfg.SSDVideos, cfg.NASPhotos, cfg.NASVideos)
 		if len(dirs) == 0 {
 			return nil
 		}
@@ -211,15 +218,41 @@ func uniqueDirs(paths ...string) []string {
 	return out
 }
 
-// buildPhase1Tasks builds Camera→SSD copy tasks from a StatusResult.
-func buildPhase1Tasks(r *status.StatusResult, cfg *config.Config) []copyop.Task {
-	tasks := make([]copyop.Task, 0, len(r.MissingOnSSD))
-	for _, f := range r.MissingOnSSD {
+// buildPhase1Tasks builds Camera→SSD copy tasks for files whose category
+// root is mounted. Files routed to an unavailable root are counted as skipped.
+func buildPhase1Tasks(missing []scan.FileInfo, cfg *config.Config, r *status.StatusResult) (tasks []copyop.Task, skipped int) {
+	for _, f := range missing {
 		cat := cfg.Category(f.RelPath)
+		if !r.SSDRootAvail(cat) {
+			skipped++
+			continue
+		}
 		tasks = append(tasks, copyop.Task{
 			Src:        f,
-			DstRelPath: f.DestRelPath(cat),
+			DstRoot:    cfg.SSDRoot(cat),
+			DstRelPath: f.DestRelPath(),
 		})
 	}
-	return tasks
+	return tasks, skipped
+}
+
+// buildSyncTasks builds SSD→NAS copy tasks from already-computed missing
+// files, honouring the current selection and NAS root availability.
+func buildSyncTasks(missing []scan.FileInfo, cfg *config.Config, r *status.StatusResult) (tasks []copyop.Task, skipped int) {
+	seen := map[string]bool{}
+	for _, f := range missing {
+		cat := cfg.Category(f.RelPath)
+		if !r.NASRootAvail(cat) {
+			skipped++
+			continue
+		}
+		key := cat + "|" + strings.ToLower(f.RelPath)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		tasks = append(tasks, copyop.Task{Src: f, DstRoot: cfg.NASRoot(cat), DstRelPath: f.RelPath})
+	}
+	sortVideosFirst(tasks, cfg)
+	return tasks, skipped
 }

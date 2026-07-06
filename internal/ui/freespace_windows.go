@@ -30,3 +30,9 @@ func FreeSpace(path string) (int64, error) {
 	}
 	return int64(freeBytesAvailable), nil
 }
+
+// FilesystemID is unsupported on Windows; callers fall back to per-root
+// space checks.
+func FilesystemID(path string) (uint64, error) {
+	return 0, syscall.EWINDOWS
+}

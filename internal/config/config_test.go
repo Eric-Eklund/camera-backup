@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
@@ -42,9 +43,11 @@ func TestNormalisedExtensions(t *testing.T) {
 
 func TestLoad_Valid(t *testing.T) {
 	path := writeTempConfig(t, `
-source = "/cam"
-ssd    = "/ssd"
-nas    = "/nas"
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+nas_photos = "/nas/Photos"
+nas_videos = "/nas/Videos"
 file_extensions  = [".NEF", ".JPG"]
 video_extensions = [".MOV"]
 `)
@@ -55,11 +58,53 @@ video_extensions = [".MOV"]
 	if cfg.Source != "/cam" {
 		t.Errorf("Source = %q", cfg.Source)
 	}
-	if cfg.SSD != "/ssd" {
-		t.Errorf("SSD = %q", cfg.SSD)
+	if cfg.SSDRoot("photos") != "/ssd/Photos" {
+		t.Errorf("SSDRoot(photos) = %q", cfg.SSDRoot("photos"))
 	}
-	if cfg.NAS != "/nas" {
-		t.Errorf("NAS = %q", cfg.NAS)
+	if cfg.SSDRoot("videos") != "/ssd/Videos" {
+		t.Errorf("SSDRoot(videos) = %q", cfg.SSDRoot("videos"))
+	}
+	if cfg.NASRoot("videos") != "/nas/Videos" {
+		t.Errorf("NASRoot(videos) = %q", cfg.NASRoot("videos"))
+	}
+	if !cfg.NASConfigured() {
+		t.Error("NASConfigured() = false, want true")
+	}
+	if cfg.SSDMerged() {
+		t.Error("SSDMerged() = true for distinct roots")
+	}
+}
+
+func TestLoad_MergedRoots(t *testing.T) {
+	path := writeTempConfig(t, `
+source     = "/cam"
+ssd_photos = "/ssd/All"
+ssd_videos = "/ssd/All"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.SSDMerged() {
+		t.Error("SSDMerged() = false for identical roots")
+	}
+	if cfg.NASConfigured() {
+		t.Error("NASConfigured() = true with no NAS keys")
+	}
+}
+
+func TestLoad_RejectsLegacyKeys(t *testing.T) {
+	path := writeTempConfig(t, `
+source = "/cam"
+ssd    = "/ssd"
+nas    = "/nas"
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for legacy ssd/nas keys")
+	}
+	if !strings.Contains(err.Error(), "ssd_photos") {
+		t.Errorf("error should include migration hint, got: %v", err)
 	}
 }
 
@@ -70,16 +115,34 @@ func TestLoad_MissingFile(t *testing.T) {
 }
 
 func TestLoad_MissingSource(t *testing.T) {
-	path := writeTempConfig(t, `ssd = "/ssd"`)
+	path := writeTempConfig(t, `
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+`)
 	if _, err := config.Load(path); err == nil {
 		t.Fatal("expected error when source is empty")
 	}
 }
 
-func TestLoad_MissingSSD(t *testing.T) {
-	path := writeTempConfig(t, `source = "/cam"`)
+func TestLoad_MissingSSDRoot(t *testing.T) {
+	path := writeTempConfig(t, `
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+`)
 	if _, err := config.Load(path); err == nil {
-		t.Fatal("expected error when ssd is empty")
+		t.Fatal("expected error when ssd_videos is empty")
+	}
+}
+
+func TestLoad_LoneNASKey(t *testing.T) {
+	path := writeTempConfig(t, `
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+nas_photos = "/nas/Photos"
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected error when only one NAS key is set")
 	}
 }
 

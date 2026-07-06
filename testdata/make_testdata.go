@@ -89,9 +89,9 @@ Phase 1 – Camera → SSD
   DSC_0001.NEF   COPY      not on SSD
   DSC_0002.NEF   SKIP      already on SSD, same size+content
   DSC_0003.NEF   COPY→_1   SSD has same name but different size (512 KB vs 1 MB)
-                            saved as photos/%s/DSC_0003_1.NEF  (in year/month/day hierarchy)
+                            saved as <ssd_photos>/%s/DSC_0003_1.NEF  (year/month/day hierarchy)
   DSC_0004.JPG   COPY      not on SSD
-  VID_0001.MOV   COPY      not on SSD  →  videos/%s/
+  VID_0001.MOV   COPY      not on SSD  →  <ssd_videos>/%s/
 
 Phase 2 – SSD → NAS
   DSC_0001.NEF     COPY    not on NAS

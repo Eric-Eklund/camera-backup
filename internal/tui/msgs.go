@@ -21,10 +21,12 @@ type phase1DoneMsg struct {
 	failures int
 }
 
-// phase2ReadyMsg carries freshly scanned SSD→NAS tasks after Phase 1 completes.
+// phase2ReadyMsg carries freshly scanned SSD→NAS tasks after Phase 1
+// completes, plus how many files were skipped because their NAS category
+// root is unavailable.
 type phase2ReadyMsg struct {
-	tasks []copyop.Task
-	err   error
+	tasks   []copyop.Task
+	skipped int
 }
 
 type copyDoneMsg struct {

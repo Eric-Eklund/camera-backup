@@ -43,9 +43,11 @@ Quick check — compares by filename and file size. Shows how much data needs to
 ```
   Devices
   ────────────────────────────────────────────────────────
-  ✅  Camera  /media/eric/NIKON        (no free space info)
-  ✅  SSD     /mnt/ssd/CameraBackup    210.4 GB free
-  ✅  NAS     /mnt/nas/CameraBackup     1.2 TB free
+  ✅  Camera      /media/eric/NIKON    (no free space info)
+  ✅  SSD photos  /mnt/ssd/Photos      210.4 GB free
+  ✅  SSD videos  /mnt/ssd/Videos      210.4 GB free
+  ✅  NAS photos  /mnt/nas/Photos       1.2 TB free
+  ✅  NAS videos  /mnt/nas/Videos       1.2 TB free
 
   Summary
   ────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verificati
 
   Copying 13 file(s) to SSD...
 
-  [1/13] photos/2026-03-24/DSC_0142.NEF
+  [1/13] 2026/2026-03/2026-03-24/DSC_0142.NEF
   DSC_0142.NEF               45.2 MB   89.3 MB/s  [████████████████████]  100.0%
     Verifying DSC_0142.NEF              ✅
   ...
@@ -151,18 +153,27 @@ copy/sync/verify with live parallel progress bars.
 Place `config.toml` next to the binary, or pass `--config <path>`.
 
 ```toml
-source = "/media/eric/NIKON"        # Camera / memory card (mount point)
-ssd    = "/mnt/ssd/CameraBackup"    # Local SSD destination
-nas    = "/mnt/nas/CameraBackup"    # NAS mounted via SMB/NFS (or WireGuard VPN)
+source     = "/media/eric/NIKON"      # Camera / memory card (mount point)
+ssd_photos = "/mnt/ssd/Photos"        # SSD destination for photos
+ssd_videos = "/mnt/ssd/Videos"        # SSD destination for videos
+nas_photos = "/mnt/nas/Photos"        # NAS destinations (optional, set both or neither)
+nas_videos = "/mnt/nas/Videos"
 
 file_extensions  = [".MOV", ".NEF", ".JPG", ".MP4"]
-video_extensions = [".MOV", ".MP4"]   # sorted into videos/ on destination
-                                       # everything else goes into photos/
+video_extensions = [".MOV", ".MP4"]   # these route to the videos destination
+                                       # everything else goes to photos
 
 # Parallel copy workers used by the TUI (optional)
 ssd_workers = 3               # camera → SSD (default 3)
 nas_workers = 1               # SSD → NAS   (default 1)
 ```
+
+Photos and videos each have their own destination directory per device. Point
+both keys at the **same** path to merge them into one tree. A file's category
+is always decided by its extension, so a merged SSD can still be split onto
+separate NAS directories (and vice versa). If one category's directory is
+unavailable (e.g. the video disk isn't mounted), the other category is still
+copied and the skipped files are reported.
 
 Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all match.
 
@@ -170,23 +181,16 @@ Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all 
 
 ## Directory structure on destination
 
-Files are organised by category and shoot date (taken from the file's modification time) in a year → month → day hierarchy. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
+Files are organised by shoot date (taken from the file's modification time) in a year → month → day hierarchy directly under each category's destination directory. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
 
 ```
-/mnt/ssd/CameraBackup/
-  photos/
-    2026/
-      2026-03/
-        2026-03-24/
-          DSC_0001.NEF
-          DSC_0001.JPG
-          DSC_0002.NEF
-  videos/
-    2026/
-      2026-03/
-        2026-03-24/
-          VIDEO001.MOV
-          VIDEO002.MP4
+/mnt/ssd/Photos/                      /mnt/ssd/Videos/
+  2026/                                 2026/
+    2026-03/                              2026-03/
+      2026-03-24/                           2026-03-24/
+        DSC_0001.NEF                          VIDEO001.MOV
+        DSC_0001.JPG                          VIDEO002.MP4
+        DSC_0002.NEF
 ```
 
 Both SSD and NAS use the same structure. The date folder prevents filename collisions across sessions (Nikon resets to `DSC_0001` when a new card is formatted).

@@ -16,7 +16,7 @@ type FileInfo struct {
 	// AbsPath is the full absolute path.
 	AbsPath string
 	// Size in bytes.
-	Size    int64
+	Size int64
 	// ModTime is used to compute the date component on the destination.
 	ModTime time.Time
 }
@@ -26,23 +26,23 @@ func (f FileInfo) Key() string {
 	return strings.ToLower(f.RelPath)
 }
 
-// DestRelPath returns the expected relative path on a destination root.
-// category is "photos" or "videos". Structure is year/year-month/year-month-day:
+// DestRelPath returns the expected relative path under a destination root.
+// The category (photos/videos) is expressed by *which* root the file goes to,
+// so the path itself is date-only:
 //
-//	"photos/2026/2026-03/2026-03-24/DSC_0001.NEF"
-//	"videos/2026/2026-03/2026-03-24/VIDEO001.MOV"
+//	"2026/2026-03/2026-03-24/DSC_0001.NEF"
 //
 // Always uses forward slashes so keys are consistent across platforms.
-func (f FileInfo) DestRelPath(category string) string {
-	year  := f.ModTime.Format("2006")
+func (f FileInfo) DestRelPath() string {
+	year := f.ModTime.Format("2006")
 	month := f.ModTime.Format("2006-01")
-	day   := f.ModTime.Format("2006-01-02")
-	return path.Join(category, year, month, day, filepath.Base(f.RelPath))
+	day := f.ModTime.Format("2006-01-02")
+	return path.Join(year, month, day, filepath.Base(f.RelPath))
 }
 
 // DestKey returns a lowercased DestRelPath for map lookups.
-func (f FileInfo) DestKey(category string) string {
-	return strings.ToLower(f.DestRelPath(category))
+func (f FileInfo) DestKey() string {
+	return strings.ToLower(f.DestRelPath())
 }
 
 // Walk scans root recursively and returns files whose extension (case-insensitive) is in exts.
@@ -85,6 +85,35 @@ func Walk(root string, exts []string) ([]FileInfo, error) {
 	return files, err
 }
 
+// SplitByCategory partitions files into photos and videos using categoryFn
+// (which normally wraps config.Category, i.e. classification by extension).
+func SplitByCategory(files []FileInfo, categoryFn func(FileInfo) string) (photos, videos []FileInfo) {
+	for _, f := range files {
+		if categoryFn(f) == "videos" {
+			videos = append(videos, f)
+		} else {
+			photos = append(photos, f)
+		}
+	}
+	return photos, videos
+}
+
+// WalkDual scans a device's photos and videos roots. When both categories
+// share one root it is scanned once and the same list is returned for both.
+// A missing or empty root yields a nil list.
+func WalkDual(photosRoot, videosRoot string, exts []string) (photos, videos []FileInfo) {
+	if photosRoot != "" {
+		photos, _ = Walk(photosRoot, exts)
+	}
+	if videosRoot == photosRoot {
+		return photos, photos
+	}
+	if videosRoot != "" {
+		videos, _ = Walk(videosRoot, exts)
+	}
+	return photos, videos
+}
+
 // IndexByRelPath indexes files by their lowercased RelPath.
 // Used for destination directories whose RelPath already includes category/date.
 func IndexByRelPath(files []FileInfo) map[string]FileInfo {
@@ -105,17 +134,17 @@ func IndexByKey(files []FileInfo) map[string]FileInfo {
 }
 
 // MissingFromDest returns camera files not yet on the destination.
-// categoryFn maps a FileInfo to "photos" or "videos".
-// dstIndex must be keyed by lowercased RelPath (category/date/filename).
+// dstIndex must be keyed by lowercased date-based RelPath and belong to the
+// same category root as the src files — split mixed sources by category first.
 //
 // A name collision (same name, different size) is resolved at copy time by
 // saving the file with a _N suffix. On later runs the original key still
 // mismatches by size, so the _N variants are probed too — otherwise the same
 // file would be copied again on every run, creating _2, _3, … forever.
-func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo, categoryFn func(FileInfo) string) []FileInfo {
+func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
 	var out []FileInfo
 	for _, f := range src {
-		key := f.DestKey(categoryFn(f))
+		key := f.DestKey()
 		existing, found := dstIndex[key]
 		if found && existing.Size == f.Size {
 			continue
