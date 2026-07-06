@@ -10,7 +10,7 @@ Built in Go. Never deletes or overwrites source files.
 
 ### Daily backup (e.g. on vacation without reliable network)
 
-1. Connect camera via USB-C (mounts as a drive, e.g. `G:\`)
+1. Connect camera via USB-C (mounts as a drive, e.g. `/media/eric/NIKON`)
 2. `camera-backup status` — see what needs copying and verify there is enough space
 3. `camera-backup copy` — copies camera → SSD with SHA256 verification, then asks whether to continue to NAS (disconnect the camera first)
 4. `camera-backup sync` — copies SSD → NAS when network is available (videos first); run overnight if needed
@@ -43,9 +43,9 @@ Quick check — compares by filename and file size. Shows how much data needs to
 ```
   Devices
   ────────────────────────────────────────────────────────
-  ✅  Camera  E:\                      (no free space info)
-  ✅  SSD     D:\CameraBackup          210.4 GB free
-  ✅  NAS     Y:\CameraBackup           1.2 TB free
+  ✅  Camera  /media/eric/NIKON        (no free space info)
+  ✅  SSD     /mnt/ssd/CameraBackup    210.4 GB free
+  ✅  NAS     /mnt/nas/CameraBackup     1.2 TB free
 
   Summary
   ────────────────────────────────────────────────────────
@@ -135,7 +135,11 @@ copy/sync/verify with live parallel progress bars.
 - `j/k` or arrows navigate, `Enter` expands groups or previews a file
 - `space` selects files (or whole groups), `a` selects all — `y` then copies
   only the selection (or everything when nothing is selected)
-- `g` opens a thumbnail grid for a date group, `v` runs verify, `q` quits
+- `g` opens a scrollable thumbnail grid for a date group — thumbnails load as
+  you scroll, and `y` starts a copy directly from the grid
+- Copies show per-file progress bars plus overall throughput and ETA;
+  `q`/`esc` cancels gracefully (files in progress finish, the queue stops)
+- `?` opens a help screen with all keybindings, `v` runs verify, `q` quits
 - Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
 - Devices are watched — plugging in the SD card refreshes the view automatically
@@ -147,9 +151,9 @@ copy/sync/verify with live parallel progress bars.
 Place `config.toml` next to the binary, or pass `--config <path>`.
 
 ```toml
-source = "E:\\"               # Camera / memory card (mounted drive)
-ssd    = "D:\\CameraBackup"   # Local SSD destination
-nas    = "Y:\\CameraBackup"   # NAS mapped via SMB (or WireGuard VPN)
+source = "/media/eric/NIKON"        # Camera / memory card (mount point)
+ssd    = "/mnt/ssd/CameraBackup"    # Local SSD destination
+nas    = "/mnt/nas/CameraBackup"    # NAS mounted via SMB/NFS (or WireGuard VPN)
 
 file_extensions  = [".MOV", ".NEF", ".JPG", ".MP4"]
 video_extensions = [".MOV", ".MP4"]   # sorted into videos/ on destination
@@ -169,18 +173,18 @@ Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all 
 Files are organised by category and shoot date (taken from the file's modification time) in a year → month → day hierarchy. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
 
 ```
-D:\CameraBackup\
-  photos\
-    2026\
-      2026-03\
-        2026-03-24\
+/mnt/ssd/CameraBackup/
+  photos/
+    2026/
+      2026-03/
+        2026-03-24/
           DSC_0001.NEF
           DSC_0001.JPG
           DSC_0002.NEF
-  videos\
-    2026\
-      2026-03\
-        2026-03-24\
+  videos/
+    2026/
+      2026-03/
+        2026-03-24/
           VIDEO001.MOV
           VIDEO002.MP4
 ```
@@ -229,15 +233,15 @@ rm -rf testdata/camera testdata/ssd testdata/nas && go run testdata/make_testdat
 
 ## Installation
 
-Requires Go 1.22+.
+Requires Go 1.26+. Linux only.
 
 ```bash
 git clone https://github.com/Eric-Eklund/camera-backup
 cd camera-backup
-GOOS=windows GOARCH=amd64 go build -o camera-backup.exe ./cmd/camera-backup
+go build -o camera-backup ./cmd/camera-backup
 ```
 
-Copy `camera-backup.exe` and `config.toml` to a folder on your laptop. Run from PowerShell or Windows Terminal.
+Copy the `camera-backup` binary and `config.toml` to a directory of your choice and run from any terminal. For RAW (.NEF) previews in the TUI, install `exiftool`.
 
 ---
 

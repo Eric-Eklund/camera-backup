@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+Linux is the only target platform.
+
 ```bash
-# Build (Windows target)
-GOOS=windows GOARCH=amd64 go build -o camera-backup.exe ./cmd/camera-backup
+# Build
+go build -o camera-backup ./cmd/camera-backup
 
 # Run all tests
 go test ./...
@@ -68,11 +70,34 @@ Comparison uses filename + size (not hash) for speed. Collision: same name but d
 ### TUI specifics
 
 - All background work runs as `tea.Cmd` goroutines; progress flows via a channel drained by `drainProgressCmd` → `p.Send()` (thread-safe)
+- The batch-done message is emitted by `drainProgressCmd` **after** all progress events have been forwarded — never emit it directly from `runBatchCmd`, or completion counts race against in-flight events
+- `q`/`esc` on the progress screen cancels gracefully via `context`: files being copied finish (destination never holds partials), queued tasks don't start, cancelled tasks are not counted as failures; `ctrl+c` is a hard quit
+- The progress screen re-renders twice a second (`progressTickCmd`) so per-file speeds stay live; the overall line shows total throughput and ETA
 - `statusReadyMsg`/`deviceChangedMsg` are ignored outside the loading/main screens so operations are never interrupted visually
-- Selection (`space`/`a`) filters what `y` copies; empty selection = copy everything
+- Selection (`space`/`a`) filters what `y` copies; empty selection = copy everything. `y` also works from the grid view
+- Grid view scrolls: `gridOffset` + `gridScrollToCursor()` keep the cursor row visible; thumbnails load incrementally for the visible window plus one lookahead row (no fixed cap)
+- `?` opens the help screen (from main and grid); the Files panel title shows the visible row range (`Files 28–53/68`) when the tree overflows
 - Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1)
 - Kitty graphics used for full-screen preview when `KittySupported()` (Ghostty/Kitty); block-art fallback otherwise; RAW previews need exiftool in PATH
 
+### Verifying TUI changes
+
+Run the TUI headless in tmux against generated testdata and inspect the actual rendering:
+
+```bash
+go run testdata/make_testdata.go
+go build -o /tmp/cb ./cmd/camera-backup
+tmux new-session -d -s tui -x 120 -y 40 '/tmp/cb --config testdata/config.toml tui'
+tmux send-keys -t tui j        # navigate/interact (one key per call, small sleep between)
+tmux capture-pane -t tui -p    # inspect the rendered screen (-e keeps colors/focus)
+tmux kill-server
+```
+
+- Also test at 80×24 — the Info panel hides below ~70 columns and rows must not wrap
+- To exercise progress/cancel/ETA, drop large files into the camera testdata first:
+  `dd if=/dev/urandom of=testdata/camera/DCIM/100NIKON/BIG_0001.MOV bs=1M count=300`
+- Reset testdata between runs: `rm -rf testdata/camera testdata/ssd testdata/nas`
+
 ### Platform-specific files
 
-`internal/ui/freespace_windows.go` and `freespace_unix.go` implement `FreeSpace()` for each platform.
+Linux is the only supported target. `internal/ui/freespace_unix.go` implements `FreeSpace()`; `freespace_windows.go` remains in the tree (build-tagged, never compiled on Linux) in case Windows support is ever revived.

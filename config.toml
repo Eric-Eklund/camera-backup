@@ -1,6 +1,6 @@
-source = "G:\\"               # Camera / memory card (mounted drive)
-ssd    = "E:\\CameraBackup"   # Local SSD destination
-nas    = "Y:\\CameraBackup"   # NAS mapped via SMB (or WireGuard VPN)
+source = "/media/eric/NIKON"        # Camera / memory card (mount point)
+ssd    = "/mnt/ssd/CameraBackup"    # Local SSD destination
+nas    = "/mnt/nas/CameraBackup"    # NAS mounted via SMB/NFS (or WireGuard VPN)
 
 file_extensions = [
   ".MOV",
