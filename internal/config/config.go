@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -19,6 +20,8 @@ type Config struct {
 	VideoExtensions []string `toml:"video_extensions"`
 	SSDWorkers      int      `toml:"ssd_workers"`
 	NASWorkers      int      `toml:"nas_workers"`
+
+	NASWriteTimeoutSeconds int `toml:"nas_write_timeout_seconds"`
 
 	// Legacy single-root keys — rejected with a migration hint in Load.
 	LegacySSD string `toml:"ssd"`
@@ -65,6 +68,17 @@ func (c *Config) NASWorkerCount() int {
 		return c.NASWorkers
 	}
 	return 1
+}
+
+// NASWriteTimeout returns the per-file write timeout for SSD→NAS copies.
+// A hard-mounted NFS/CIFS share blocks indefinitely instead of erroring when
+// the connection drops, so writes are bounded rather than trusted to fail.
+// Defaults to 60s when nas_write_timeout_seconds is unset.
+func (c *Config) NASWriteTimeout() time.Duration {
+	if c.NASWriteTimeoutSeconds > 0 {
+		return time.Duration(c.NASWriteTimeoutSeconds) * time.Second
+	}
+	return 60 * time.Second
 }
 
 // NormalisedExtensions returns all file_extensions lowercased.

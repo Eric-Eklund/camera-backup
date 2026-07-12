@@ -4,6 +4,7 @@ package copyop
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -110,7 +111,8 @@ func TestCopy_Success(t *testing.T) {
 		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
 
-	if err := Copy(task, logger); err != nil {
+	// A generous write timeout must not affect a healthy copy.
+	if err := Copy(task, logger, time.Minute); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
 
@@ -151,7 +153,7 @@ func TestCopy_NeverOverwrites(t *testing.T) {
 		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
 
-	if err := Copy(task, logger); err != nil {
+	if err := Copy(task, logger, 0); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
 
@@ -176,8 +178,70 @@ func TestCopy_MissingSource(t *testing.T) {
 		DstRoot:    t.TempDir(),
 		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
-	if err := Copy(task, logger); err == nil {
+	if err := Copy(task, logger, 0); err == nil {
 		t.Fatal("expected error for missing source")
+	}
+}
+
+// ── copyStream write timeout ──────────────────────────────────────────────────
+
+// blockingWriteCloser blocks every Write until release is closed — a stand-in
+// for a hard-mounted NAS share whose connection has dropped.
+type blockingWriteCloser struct{ release chan struct{} }
+
+func (b *blockingWriteCloser) Write(p []byte) (int, error) { <-b.release; return len(p), nil }
+func (b *blockingWriteCloser) Close() error                { return nil }
+
+func TestCopyStream_HangingWriterTimesOut(t *testing.T) {
+	w := &blockingWriteCloser{release: make(chan struct{})}
+	abandoned := make(chan struct{})
+
+	err := copyStream(w, strings.NewReader("stuck data"), io.Discard,
+		"VIDEO001.MOV", "/nas/VIDEO001.MOV", 50*time.Millisecond, func() { close(abandoned) })
+	if !errors.Is(err, errWriteTimeout) {
+		t.Fatalf("err = %v, want errWriteTimeout", err)
+	}
+
+	// Cleanup must not run while the write is still stalled — it would block
+	// on the hung mount just like the write itself.
+	select {
+	case <-abandoned:
+		t.Fatal("onAbandoned ran while the write was still stalled")
+	default:
+	}
+
+	// Once the stalled write finally returns, cleanup must fire.
+	close(w.release)
+	select {
+	case <-abandoned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("onAbandoned was not called after the stalled write returned")
+	}
+}
+
+// slowWriteCloser delays each Write but always completes.
+type slowWriteCloser struct{ delay time.Duration }
+
+func (s *slowWriteCloser) Write(p []byte) (int, error) { time.Sleep(s.delay); return len(p), nil }
+func (s *slowWriteCloser) Close() error                { return nil }
+
+func TestCopyStream_SlowWriterWithinTimeout(t *testing.T) {
+	w := &slowWriteCloser{delay: time.Millisecond}
+	err := copyStream(w, strings.NewReader("slow but steady"), io.Discard,
+		"DSC_0001.NEF", "/nas/DSC_0001.NEF", 5*time.Second,
+		func() { t.Error("onAbandoned called for a copy that finished in time") })
+	if err != nil {
+		t.Fatalf("copyStream: %v", err)
+	}
+}
+
+func TestCopyStream_NoTimeoutWaitsForever(t *testing.T) {
+	w := &slowWriteCloser{delay: time.Millisecond}
+	err := copyStream(w, strings.NewReader("no deadline"), io.Discard,
+		"DSC_0001.NEF", "/nas/DSC_0001.NEF", 0,
+		func() { t.Error("onAbandoned called with timeout disabled") })
+	if err != nil {
+		t.Fatalf("copyStream: %v", err)
 	}
 }
 
@@ -219,7 +283,7 @@ func TestRunBatch_AllSucceed(t *testing.T) {
 		{Src: scan.FileInfo{AbsPath: filepath.Join(src, "C.JPG"), RelPath: "C.JPG", Size: 4, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/C.JPG"},
 	}
 
-	if errs := RunBatch(tasks, logger, false); errs != 0 {
+	if errs := RunBatch(tasks, logger, false, 0); errs != 0 {
 		t.Errorf("errCount = %d, want 0", errs)
 	}
 }
@@ -238,7 +302,7 @@ func TestRunBatch_CountsErrors(t *testing.T) {
 		{Src: scan.FileInfo{AbsPath: "/nonexistent.NEF", RelPath: "missing.NEF", Size: 100, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/missing.NEF"},
 	}
 
-	if errs := RunBatch(tasks, logger, false); errs != 1 {
+	if errs := RunBatch(tasks, logger, false, 0); errs != 1 {
 		t.Errorf("errCount = %d, want 1", errs)
 	}
 }
@@ -266,7 +330,7 @@ func TestCopy_CollisionLogged(t *testing.T) {
 		DstRoot:    dst,
 		DstRelPath: "2026-03-25/DSC_0001.NEF",
 	}
-	if err := Copy(task, logger); err != nil {
+	if err := Copy(task, logger, 0); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
 
@@ -407,7 +471,7 @@ func TestRunBatch_ContinuesAfterError(t *testing.T) {
 		{Src: scan.FileInfo{AbsPath: lastFile, RelPath: "last.NEF", Size: 4, ModTime: modtime}, DstRoot: dst, DstRelPath: "2026-03-25/last.NEF"},
 	}
 
-	RunBatch(tasks, logger, false)
+	RunBatch(tasks, logger, false, 0)
 
 	// last.NEF should have been copied despite the earlier error.
 	if _, err := os.Stat(filepath.Join(dst, "2026-03-25/last.NEF")); err != nil {

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 )
@@ -90,6 +91,29 @@ ssd_videos = "/ssd/All"
 	}
 	if cfg.NASConfigured() {
 		t.Error("NASConfigured() = true with no NAS keys")
+	}
+}
+
+func TestNASWriteTimeout_Default(t *testing.T) {
+	cfg := &config.Config{}
+	if got := cfg.NASWriteTimeout(); got != 60*time.Second {
+		t.Errorf("NASWriteTimeout() = %v, want 60s default", got)
+	}
+}
+
+func TestNASWriteTimeout_FromConfig(t *testing.T) {
+	path := writeTempConfig(t, `
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+nas_write_timeout_seconds = 15
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.NASWriteTimeout(); got != 15*time.Second {
+		t.Errorf("NASWriteTimeout() = %v, want 15s", got)
 	}
 }
 

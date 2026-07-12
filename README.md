@@ -166,6 +166,13 @@ video_extensions = [".MOV", ".MP4"]   # these route to the videos destination
 # Parallel copy workers used by the TUI (optional)
 ssd_workers = 3               # camera → SSD (default 3)
 nas_workers = 1               # SSD → NAS   (default 1)
+
+# Per-file write timeout for SSD → NAS copies (optional, default 60)
+# Guards against hung network mounts: a hard-mounted NFS/CIFS share blocks
+# forever when the connection drops instead of returning an error. When a
+# file hits this timeout it is counted as failed and the sync moves on to
+# the next file. See "Recommended NAS mount options" below.
+nas_write_timeout_seconds = 60
 ```
 
 Photos and videos each have their own destination directory per device. Point

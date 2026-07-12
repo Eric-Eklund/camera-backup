@@ -250,7 +250,7 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 				return err
 			}
 			ui.Bold.Printf("\n  Copying %d file(s) to SSD...\n", len(tasks))
-			errs := copyop.RunBatch(tasks, logger, true)
+			errs := copyop.RunBatch(tasks, logger, true, 0)
 			fmt.Println()
 			if errs > 0 {
 				ui.Red.Printf("  ❌  %d file(s) failed to copy — do not disconnect the camera.\n", errs)
@@ -358,7 +358,7 @@ func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
 		ui.Bold.Printf("\n  Copying %d file(s) to NAS (videos first)...\n", len(tasks))
 		logger.Println("SSD → NAS")
 	}
-	errs := copyop.RunBatch(tasks, logger, false)
+	errs := copyop.RunBatch(tasks, logger, false, cfg.NASWriteTimeout())
 	fmt.Println()
 	if errs > 0 {
 		ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
