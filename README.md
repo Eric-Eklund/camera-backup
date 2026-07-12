@@ -187,6 +187,49 @@ copied and the skipped files are reported.
 
 Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all match.
 
+### Recommended NAS mount options
+
+When syncing over an unstable connection (e.g. a phone hotspot tethered to the
+laptop, WireGuard back to the NAS at home), the way the share is mounted
+matters more than anything this tool can do.
+
+By default, NFS uses a **hard** mount: if the connection drops, every read and
+write against the mount **blocks indefinitely** until the server comes back —
+it never returns an error. That is the right behaviour for data integrity on a
+LAN, but on a flaky link it means `sync` (and anything else touching the
+mount, including `ls`) freezes with no feedback. The
+`nas_write_timeout_seconds` setting above ensures the sync itself moves on to
+the next file, but the stalled write still holds a partial file on the NAS
+until the mount recovers — fixing it at the mount level is better.
+
+For **NFS**, use a soft mount with a bounded retry budget:
+
+```
+# /etc/fstab
+nas:/volume1/photos  /mnt/nas/Photos  nfs  soft,timeo=100,retrans=3,_netdev  0  0
+```
+
+- `soft` — return an I/O error to the application instead of blocking forever
+- `timeo=100` — wait 10 seconds (deciseconds) before each retransmission
+- `retrans=3` — give up after 3 retries, so a dead link fails in ~30–60 s
+
+`soft` can, in theory, cause silent data corruption on writes that error
+mid-flight — which is exactly why this tool never trusts the fast SSD→NAS copy
+and `verify` re-hashes everything afterwards. Failed files are simply
+re-copied on the next `sync`.
+
+For **CIFS/SMB**, the equivalent is:
+
+```
+//nas/photos  /mnt/nas/Photos  cifs  soft,echo_interval=10,credentials=/etc/nas-creds,_netdev  0  0
+```
+
+- `soft` — same semantics as NFS: error out instead of hanging
+- `echo_interval=10` — detect a dead server after ~2×10 s of silence
+
+With a hard mount (or the `hard` default), keep `nas_write_timeout_seconds`
+low so a hang costs one timeout per file instead of a frozen terminal.
+
 ---
 
 ## Directory structure on destination
