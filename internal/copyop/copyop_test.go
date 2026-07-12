@@ -265,6 +265,42 @@ func TestTotalSize_Empty(t *testing.T) {
 	}
 }
 
+func TestSortBySizeAsc(t *testing.T) {
+	modtime := time.Now()
+	tasks := []Task{
+		{Src: scan.FileInfo{RelPath: "big.MOV", Size: 3_000_000, ModTime: modtime}},
+		{Src: scan.FileInfo{RelPath: "small.JPG", Size: 200, ModTime: modtime}},
+		{Src: scan.FileInfo{RelPath: "mid.NEF", Size: 45_000, ModTime: modtime}},
+	}
+
+	SortBySizeAsc(tasks)
+
+	want := []string{"small.JPG", "mid.NEF", "big.MOV"}
+	for i, w := range want {
+		if tasks[i].Src.RelPath != w {
+			t.Errorf("tasks[%d] = %q, want %q", i, tasks[i].Src.RelPath, w)
+		}
+	}
+}
+
+func TestSortBySizeAsc_StableForEqualSizes(t *testing.T) {
+	modtime := time.Now()
+	tasks := []Task{
+		{Src: scan.FileInfo{RelPath: "a.JPG", Size: 100, ModTime: modtime}},
+		{Src: scan.FileInfo{RelPath: "b.JPG", Size: 100, ModTime: modtime}},
+		{Src: scan.FileInfo{RelPath: "c.JPG", Size: 100, ModTime: modtime}},
+	}
+
+	SortBySizeAsc(tasks)
+
+	want := []string{"a.JPG", "b.JPG", "c.JPG"}
+	for i, w := range want {
+		if tasks[i].Src.RelPath != w {
+			t.Errorf("tasks[%d] = %q, want %q — equal sizes must keep their order", i, tasks[i].Src.RelPath, w)
+		}
+	}
+}
+
 func TestRunBatch_AllSucceed(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()

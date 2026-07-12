@@ -31,7 +31,7 @@ Three-stage incremental backup pipeline: **Camera → SSD → NAS**
 Five subcommands (Cobra CLI):
 - `status` — scans all three destinations and shows missing file counts + free space
 - `copy` — Camera→SSD (CopyAndVerify) then SSD→NAS (fast Copy)
-- `sync` — SSD→NAS only, no camera required; `--videos-only/-v` flag; videos always first
+- `sync` — SSD→NAS only, no camera required; `--videos-only/-v` and `--photos-only/-p` filter by category (mutually exclusive); `--order=size-asc` sorts the batch smallest-first; default order is videos first
 - `verify` — deep SHA256 check; uses camera as authority, falls back to SSD if camera absent
 - `tui` — interactive bubbletea TUI wrapping all of the above with parallel copy workers
 

@@ -97,15 +97,18 @@ If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly
 
 ### `camera-backup sync`
 
-Copies files missing from NAS from the SSD. No camera required. Videos are always transferred before photos.
+Copies files missing from NAS from the SSD. No camera required. By default videos are transferred before photos.
 
 ```
-camera-backup sync              # all missing files, videos first
-camera-backup sync --videos-only  # only video files
-camera-backup sync -v             # shorthand
+camera-backup sync                    # all missing files, videos first
+camera-backup sync --videos-only     # only video files (-v)
+camera-backup sync --photos-only     # only photo files (-p)
+camera-backup sync --order=size-asc  # smallest files first, regardless of type
 ```
 
 Use this when network becomes available after a `copy` run, or to push only videos when bandwidth is limited.
+
+On a flaky or metered connection (e.g. a phone hotspot), small photo files are far more likely to complete before the link drops than multi-gigabyte videos. `--photos-only` pushes just the photos, and `--order=size-asc` sorts the whole batch by file size ascending so the most-likely-to-succeed files go first. Without `--order`, the default videos-first behaviour is unchanged.
 
 ### `camera-backup verify`
 

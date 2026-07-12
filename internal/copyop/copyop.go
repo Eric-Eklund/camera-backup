@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -225,6 +226,12 @@ func Copy(t Task, logger *log.Logger, writeTimeout time.Duration) error {
 
 	logCollision(t, intendedPath, dstPath, logger)
 	return nil
+}
+
+// SortBySizeAsc orders tasks by source file size, smallest first (stable),
+// so the files most likely to complete over a flaky connection go first.
+func SortBySizeAsc(tasks []Task) {
+	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].Src.Size < tasks[j].Src.Size })
 }
 
 // TotalSize returns the sum of source file sizes across all tasks.
