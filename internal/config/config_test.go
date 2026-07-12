@@ -117,6 +117,41 @@ nas_write_timeout_seconds = 15
 	}
 }
 
+func TestSyncOrder_Default(t *testing.T) {
+	cfg := &config.Config{}
+	if got := cfg.SyncOrder(); got != config.OrderVideosFirst {
+		t.Errorf("SyncOrder() = %q, want %q", got, config.OrderVideosFirst)
+	}
+}
+
+func TestSyncOrder_FromConfig(t *testing.T) {
+	path := writeTempConfig(t, `
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+nas_sync_order = "size-asc"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.SyncOrder(); got != config.OrderSizeAsc {
+		t.Errorf("SyncOrder() = %q, want %q", got, config.OrderSizeAsc)
+	}
+}
+
+func TestLoad_RejectsInvalidSyncOrder(t *testing.T) {
+	path := writeTempConfig(t, `
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+nas_sync_order = "biggest-first"
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected error for invalid nas_sync_order")
+	}
+}
+
 func TestLoad_RejectsLegacyKeys(t *testing.T) {
 	path := writeTempConfig(t, `
 source = "/cam"

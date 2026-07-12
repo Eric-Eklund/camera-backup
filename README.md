@@ -108,7 +108,7 @@ camera-backup sync --order=size-asc  # smallest files first, regardless of type
 
 Use this when network becomes available after a `copy` run, or to push only videos when bandwidth is limited.
 
-On a flaky or metered connection (e.g. a phone hotspot), small photo files are far more likely to complete before the link drops than multi-gigabyte videos. `--photos-only` pushes just the photos, and `--order=size-asc` sorts the whole batch by file size ascending so the most-likely-to-succeed files go first. Without `--order`, the default videos-first behaviour is unchanged.
+On a flaky or metered connection (e.g. a phone hotspot), small photo files are far more likely to complete before the link drops than multi-gigabyte videos. `--photos-only` pushes just the photos, and `--order=size-asc` sorts the whole batch by file size ascending so the most-likely-to-succeed files go first. Without `--order`, the order comes from the `nas_sync_order` config key (default: videos first, unchanged behaviour).
 
 ### `camera-backup verify`
 
@@ -148,6 +148,8 @@ copy/sync/verify with live parallel progress bars.
 - Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
 - Devices are watched — plugging in the SD card refreshes the view automatically
+- SSD→NAS copies honour `nas_write_timeout_seconds` (a hung mount fails the
+  file, not the batch) and `nas_sync_order` from config.toml
 
 ---
 
@@ -174,8 +176,14 @@ nas_workers = 1               # SSD → NAS   (default 1)
 # Guards against hung network mounts: a hard-mounted NFS/CIFS share blocks
 # forever when the connection drops instead of returning an error. When a
 # file hits this timeout it is counted as failed and the sync moves on to
-# the next file. See "Recommended NAS mount options" below.
+# the next file. Applies to both the CLI and the TUI.
+# See "Recommended NAS mount options" below.
 nas_write_timeout_seconds = 60
+
+# SSD → NAS transfer order (optional): "videos-first" (default) or "size-asc"
+# (smallest files first — most likely to complete on a flaky connection).
+# Used by the TUI and as the default for `sync --order`.
+nas_sync_order = "videos-first"
 ```
 
 Photos and videos each have their own destination directory per device. Point

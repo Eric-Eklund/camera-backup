@@ -21,7 +21,8 @@ type Config struct {
 	SSDWorkers      int      `toml:"ssd_workers"`
 	NASWorkers      int      `toml:"nas_workers"`
 
-	NASWriteTimeoutSeconds int `toml:"nas_write_timeout_seconds"`
+	NASWriteTimeoutSeconds int    `toml:"nas_write_timeout_seconds"`
+	NASSyncOrder           string `toml:"nas_sync_order"`
 
 	// Legacy single-root keys — rejected with a migration hint in Load.
 	LegacySSD string `toml:"ssd"`
@@ -68,6 +69,21 @@ func (c *Config) NASWorkerCount() int {
 		return c.NASWorkers
 	}
 	return 1
+}
+
+// Transfer orders for SSD→NAS copies (nas_sync_order / sync --order).
+const (
+	OrderVideosFirst = "videos-first" // default: large videos go first
+	OrderSizeAsc     = "size-asc"     // smallest files first — best on flaky links
+)
+
+// SyncOrder returns the configured SSD→NAS transfer order, used by the TUI
+// and as the default for sync --order. Defaults to videos-first when unset.
+func (c *Config) SyncOrder() string {
+	if c.NASSyncOrder != "" {
+		return c.NASSyncOrder
+	}
+	return OrderVideosFirst
 }
 
 // NASWriteTimeout returns the per-file write timeout for SSD→NAS copies.
@@ -157,6 +173,9 @@ point the keys at your existing <root>/photos and <root>/videos directories`,
 	// NAS is optional, but a lone key is almost certainly a mistake.
 	if (cfg.NASPhotos == "") != (cfg.NASVideos == "") {
 		return nil, fmt.Errorf("config: set both nas_photos and nas_videos (use the same path to merge), or neither")
+	}
+	if cfg.NASSyncOrder != "" && cfg.NASSyncOrder != OrderVideosFirst && cfg.NASSyncOrder != OrderSizeAsc {
+		return nil, fmt.Errorf("config: nas_sync_order must be %q or %q", OrderVideosFirst, OrderSizeAsc)
 	}
 	return &cfg, nil
 }

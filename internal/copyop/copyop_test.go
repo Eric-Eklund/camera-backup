@@ -245,6 +245,18 @@ func TestCopyStream_NoTimeoutWaitsForever(t *testing.T) {
 	}
 }
 
+func TestSendGuard_LateSendAfterCloseIsNoOp(t *testing.T) {
+	g := &sendGuard{}
+	events := make(chan FileProgress, 1)
+	g.closeCh(events)
+	// A copy abandoned after a write timeout may fire long after the batch
+	// closed the channel — the send must be swallowed, not panic.
+	g.send(events, FileProgress{RelPath: "late.MOV"})
+	if _, ok := <-events; ok {
+		t.Error("unexpected event on closed channel")
+	}
+}
+
 // ── RunBatch ──────────────────────────────────────────────────────────────────
 
 func TestTotalSize(t *testing.T) {
@@ -421,7 +433,8 @@ func TestRunBatchParallel_AllSucceed(t *testing.T) {
 	doneCh := make(chan int, 1)
 	go func() { doneCh <- drain(events) }()
 
-	failures := RunBatchParallel(context.Background(), tasks, logger, false, 2, events)
+	// A generous NAS write timeout must not affect healthy copies.
+	failures := RunBatchParallel(context.Background(), tasks, logger, false, time.Minute, 2, events)
 	if failures != 0 {
 		t.Errorf("failures = %d, want 0", failures)
 	}
@@ -442,7 +455,7 @@ func TestRunBatchParallel_CancelledBeforeStart(t *testing.T) {
 	doneCh := make(chan int, 1)
 	go func() { doneCh <- drain(events) }()
 
-	failures := RunBatchParallel(ctx, tasks, logger, false, 2, events)
+	failures := RunBatchParallel(ctx, tasks, logger, false, 0, 2, events)
 	if failures != 0 {
 		t.Errorf("failures = %d, want 0 — cancelled tasks must not count as failures", failures)
 	}
@@ -479,7 +492,7 @@ func TestRunBatchParallel_CancelMidBatch(t *testing.T) {
 		doneCh <- n
 	}()
 
-	failures := RunBatchParallel(ctx, tasks, logger, false, 1, events)
+	failures := RunBatchParallel(ctx, tasks, logger, false, 0, 1, events)
 	done := <-doneCh
 
 	if failures != 0 {
