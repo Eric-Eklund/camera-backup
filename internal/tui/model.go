@@ -1044,7 +1044,7 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		events := make(chan copyop.FileProgress, 64)
 		result := make(chan int, 1)
 		return m, tea.Batch(
-			runBatchCmd(ctx, tasks, m.logger, true, m.cfg.SSDWorkerCount(), events, result),
+			runBatchCmd(ctx, tasks, m.logger, true, 0, m.cfg.SSDWorkerCount(), events, result),
 			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return phase1DoneMsg{failures: f} }),
 			progressTickCmd(),
 		)
@@ -1078,7 +1078,7 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		events := make(chan copyop.FileProgress, 64)
 		result := make(chan int, 1)
 		return m, tea.Batch(
-			runBatchCmd(ctx, tasks, m.logger, false, m.cfg.NASWorkerCount(), events, result),
+			runBatchCmd(ctx, tasks, m.logger, false, m.cfg.NASWriteTimeout(), m.cfg.NASWorkerCount(), events, result),
 			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
 			progressTickCmd(),
 		)
@@ -1113,7 +1113,7 @@ func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
 	events := make(chan copyop.FileProgress, 64)
 	result := make(chan int, 1)
 	return m, tea.Batch(
-		runBatchCmd(ctx, m.phase2Tasks, m.logger, false, m.cfg.NASWorkerCount(), events, result),
+		runBatchCmd(ctx, m.phase2Tasks, m.logger, false, m.cfg.NASWriteTimeout(), m.cfg.NASWorkerCount(), events, result),
 		drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
 		progressTickCmd(),
 	)

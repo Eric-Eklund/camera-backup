@@ -31,7 +31,7 @@ Three-stage incremental backup pipeline: **Camera → SSD → NAS**
 Five subcommands (Cobra CLI):
 - `status` — scans all three destinations and shows missing file counts + free space
 - `copy` — Camera→SSD (CopyAndVerify) then SSD→NAS (fast Copy)
-- `sync` — SSD→NAS only, no camera required; `--videos-only/-v` flag; videos always first
+- `sync` — SSD→NAS only, no camera required; `--videos-only/-v` and `--photos-only/-p` filter by category (mutually exclusive); `--order=size-asc` sorts the batch smallest-first; default order comes from `nas_sync_order` (videos first when unset)
 - `verify` — deep SHA256 check; uses camera as authority, falls back to SSD if camera absent
 - `tui` — interactive bubbletea TUI wrapping all of the above with parallel copy workers
 
@@ -93,7 +93,7 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 - Selection (`space`/`a`) filters what `y` copies; empty selection = copy everything. `y` also works from the grid view
 - Grid view scrolls: `gridOffset` + `gridScrollToCursor()` keep the cursor row visible; thumbnails load incrementally for the visible window plus one lookahead row (no fixed cap)
 - `?` opens the help screen (from main and grid); the Files panel title shows the visible row range (`Files 28–53/68`) when the tree overflows
-- Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1)
+- Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1); NAS copies also honour `nas_write_timeout_seconds` and `nas_sync_order` — the timeout never applies to verified Camera→SSD copies
 - Kitty graphics used for full-screen preview when `KittySupported()` (Ghostty/Kitty); block-art fallback otherwise; RAW previews need exiftool in PATH
 
 ### Verifying TUI changes

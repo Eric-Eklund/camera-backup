@@ -148,8 +148,15 @@ func newCopyCmd(configPath *string) *cobra.Command {
 	}
 }
 
+// syncOptions controls which categories runSync transfers and in what order.
+type syncOptions struct {
+	videosOnly bool
+	photosOnly bool
+	order      string // config.OrderVideosFirst or config.OrderSizeAsc
+}
+
 func newSyncCmd(configPath *string) *cobra.Command {
-	var videosOnly bool
+	var opts syncOptions
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Copy missing files SSD→NAS (no camera required)",
@@ -164,10 +171,20 @@ func newSyncCmd(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runSync(cfg, logger, videosOnly)
+			if opts.order == "" {
+				opts.order = cfg.SyncOrder()
+			}
+			if opts.order != config.OrderVideosFirst && opts.order != config.OrderSizeAsc {
+				return fmt.Errorf("invalid --order %q (valid: %s, %s)", opts.order, config.OrderVideosFirst, config.OrderSizeAsc)
+			}
+			return runSync(cfg, logger, opts)
 		},
 	}
-	cmd.Flags().BoolVarP(&videosOnly, "videos-only", "v", false, "Only sync video files to NAS")
+	cmd.Flags().BoolVarP(&opts.videosOnly, "videos-only", "v", false, "Only sync video files to NAS")
+	cmd.Flags().BoolVarP(&opts.photosOnly, "photos-only", "p", false, "Only sync photo files to NAS")
+	cmd.Flags().StringVar(&opts.order, "order", "",
+		"Transfer order: videos-first or size-asc (smallest files first, best on flaky connections; default from nas_sync_order, else videos-first)")
+	cmd.MarkFlagsMutuallyExclusive("videos-only", "photos-only")
 	return cmd
 }
 
@@ -255,7 +272,7 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 				return err
 			}
 			ui.Bold.Printf("\n  Copying %d file(s) to SSD...\n", len(tasks))
-			errs := copyop.RunBatch(tasks, logger, true)
+			errs := copyop.RunBatch(tasks, logger, true, 0)
 			fmt.Println()
 			if errs > 0 {
 				ui.Red.Printf("  ❌  %d file(s) failed to copy — do not disconnect the camera.\n", errs)
@@ -280,15 +297,16 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 	ui.PrintSeparator()
 
 	// ── Phase 2: SSD → NAS ────────────────────────────────────────────────────
-	return runSync(cfg, logger, false)
+	return runSync(cfg, logger, syncOptions{order: cfg.SyncOrder()})
 }
 
 // runSync copies files from SSD that are missing on the NAS.
-// If videosOnly is true only video files are synced.
-// Videos are always transferred before photos so they are prioritised if the
-// connection is lost mid-run.
+// opts filters the batch to one category (videosOnly/photosOnly) and picks the
+// transfer order: videos first by default so they are prioritised if the
+// connection is lost mid-run, or smallest-first with order=size-asc so the
+// most-likely-to-succeed files go first on a flaky connection.
 // It is called by both the copy command (phase 2) and the standalone sync command.
-func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
+func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	exts := cfg.NormalisedExtensions()
 	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
 
@@ -321,7 +339,10 @@ func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
 	// skipped with a warning; duplicates across SSD roots are copied once.
 	var tasks []copyop.Task
 	addCategory := func(files []scan.FileInfo, cat string, avail bool, nasFiles []scan.FileInfo) {
-		if videosOnly && cat != "videos" {
+		if opts.videosOnly && cat != "videos" {
+			return
+		}
+		if opts.photosOnly && cat != "photos" {
 			return
 		}
 		missing := scan.MissingByRelPath(files, scan.IndexByRelPath(nasFiles))
@@ -346,6 +367,9 @@ func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
 	}
 	addCategory(videos, "videos", nasVideosAvail, nasVideoFiles)
 	addCategory(photos, "photos", nasPhotosAvail, nasPhotoFiles)
+	if opts.order == config.OrderSizeAsc {
+		copyop.SortBySizeAsc(tasks)
+	}
 
 	if len(tasks) == 0 {
 		ui.Green.Println("\n  NAS is already up to date — nothing to copy.")
@@ -356,14 +380,21 @@ func runSync(cfg *config.Config, logger *log.Logger, videosOnly bool) error {
 	if err := copyop.CheckSpace(tasks); err != nil {
 		return err
 	}
-	if videosOnly {
+	switch {
+	case opts.videosOnly:
 		ui.Bold.Printf("\n  Copying %d video(s) to NAS...\n", len(tasks))
 		logger.Println("SSD → NAS (videos only)")
-	} else {
+	case opts.photosOnly:
+		ui.Bold.Printf("\n  Copying %d photo(s) to NAS...\n", len(tasks))
+		logger.Println("SSD → NAS (photos only)")
+	case opts.order == config.OrderSizeAsc:
+		ui.Bold.Printf("\n  Copying %d file(s) to NAS (smallest first)...\n", len(tasks))
+		logger.Println("SSD → NAS (size ascending)")
+	default:
 		ui.Bold.Printf("\n  Copying %d file(s) to NAS (videos first)...\n", len(tasks))
 		logger.Println("SSD → NAS")
 	}
-	errs := copyop.RunBatch(tasks, logger, false)
+	errs := copyop.RunBatch(tasks, logger, false, cfg.NASWriteTimeout())
 	fmt.Println()
 	if errs > 0 {
 		ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)

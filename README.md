@@ -97,15 +97,18 @@ If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly
 
 ### `camera-backup sync`
 
-Copies files missing from NAS from the SSD. No camera required. Videos are always transferred before photos.
+Copies files missing from NAS from the SSD. No camera required. By default videos are transferred before photos.
 
 ```
-camera-backup sync              # all missing files, videos first
-camera-backup sync --videos-only  # only video files
-camera-backup sync -v             # shorthand
+camera-backup sync                    # all missing files, videos first
+camera-backup sync --videos-only     # only video files (-v)
+camera-backup sync --photos-only     # only photo files (-p)
+camera-backup sync --order=size-asc  # smallest files first, regardless of type
 ```
 
 Use this when network becomes available after a `copy` run, or to push only videos when bandwidth is limited.
+
+On a flaky or metered connection (e.g. a phone hotspot), small photo files are far more likely to complete before the link drops than multi-gigabyte videos. `--photos-only` pushes just the photos, and `--order=size-asc` sorts the whole batch by file size ascending so the most-likely-to-succeed files go first. Without `--order`, the order comes from the `nas_sync_order` config key (default: videos first, unchanged behaviour).
 
 ### `camera-backup verify`
 
@@ -145,6 +148,8 @@ copy/sync/verify with live parallel progress bars.
 - Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
 - Devices are watched — plugging in the SD card refreshes the view automatically
+- SSD→NAS copies honour `nas_write_timeout_seconds` (a hung mount fails the
+  file, not the batch) and `nas_sync_order` from config.toml
 
 ---
 
@@ -168,6 +173,19 @@ video_extensions = [".MOV", ".MP4"]   # these route to the videos destination
 # Parallel copy workers used by the TUI (optional)
 ssd_workers = 3               # camera → SSD (default 3)
 nas_workers = 1               # SSD → NAS   (default 1)
+
+# Per-file write timeout for SSD → NAS copies (optional, default 60)
+# Guards against hung network mounts: a hard-mounted NFS/CIFS share blocks
+# forever when the connection drops instead of returning an error. When a
+# file hits this timeout it is counted as failed and the sync moves on to
+# the next file. Applies to both the CLI and the TUI.
+# See "Recommended NAS mount options" below.
+nas_write_timeout_seconds = 60
+
+# SSD → NAS transfer order (optional): "videos-first" (default) or "size-asc"
+# (smallest files first — most likely to complete on a flaky connection).
+# Used by the TUI and as the default for `sync --order`.
+nas_sync_order = "videos-first"
 ```
 
 Photos and videos each have their own destination directory per device. Point
@@ -178,6 +196,49 @@ unavailable (e.g. the video disk isn't mounted), the other category is still
 copied and the skipped files are reported.
 
 Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all match.
+
+### Recommended NAS mount options
+
+When syncing over an unstable connection (e.g. a phone hotspot tethered to the
+laptop, WireGuard back to the NAS at home), the way the share is mounted
+matters more than anything this tool can do.
+
+By default, NFS uses a **hard** mount: if the connection drops, every read and
+write against the mount **blocks indefinitely** until the server comes back —
+it never returns an error. That is the right behaviour for data integrity on a
+LAN, but on a flaky link it means `sync` (and anything else touching the
+mount, including `ls`) freezes with no feedback. The
+`nas_write_timeout_seconds` setting above ensures the sync itself moves on to
+the next file, but the stalled write still holds a partial file on the NAS
+until the mount recovers — fixing it at the mount level is better.
+
+For **NFS**, use a soft mount with a bounded retry budget:
+
+```
+# /etc/fstab
+nas:/volume1/photos  /mnt/nas/Photos  nfs  soft,timeo=100,retrans=3,_netdev  0  0
+```
+
+- `soft` — return an I/O error to the application instead of blocking forever
+- `timeo=100` — wait 10 seconds (deciseconds) before each retransmission
+- `retrans=3` — give up after 3 retries, so a dead link fails in ~30–60 s
+
+`soft` can, in theory, cause silent data corruption on writes that error
+mid-flight — which is exactly why this tool never trusts the fast SSD→NAS copy
+and `verify` re-hashes everything afterwards. Failed files are simply
+re-copied on the next `sync`.
+
+For **CIFS/SMB**, the equivalent is:
+
+```
+//nas/photos  /mnt/nas/Photos  cifs  soft,echo_interval=10,credentials=/etc/nas-creds,_netdev  0  0
+```
+
+- `soft` — same semantics as NFS: error out instead of hanging
+- `echo_interval=10` — detect a dead server after ~2×10 s of silence
+
+With a hard mount (or the `hard` default), keep `nas_write_timeout_seconds`
+low so a hang costs one timeout per file instead of a frozen terminal.
 
 ---
 

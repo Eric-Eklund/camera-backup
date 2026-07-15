@@ -19,3 +19,12 @@ video_extensions = [".MOV", ".MP4"] # these route to the videos destination; eve
 # Parallel copy workers used by the TUI (optional)
 #ssd_workers = 3 # camera → SSD (default 3)
 #nas_workers = 1 # SSD → NAS   (default 1)
+
+# Per-file write timeout for SSD → NAS copies (optional, default 60) —
+# guards against hung network mounts; see "Recommended NAS mount options" in README
+#nas_write_timeout_seconds = 60
+
+# SSD → NAS transfer order (optional): "videos-first" (default) or "size-asc"
+# (smallest files first — best on flaky connections); used by the TUI and as
+# the default for `sync --order`
+#nas_sync_order = "videos-first"

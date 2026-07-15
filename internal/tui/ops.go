@@ -31,9 +31,9 @@ func statusScanCmd(cfg *config.Config, logger *log.Logger) tea.Cmd {
 // by RunBatchParallel when done) and the failure count to result. The done
 // message itself is emitted by drainProgressCmd — after every progress event
 // has been forwarded — so completion counts are never racy.
-func runBatchCmd(ctx context.Context, tasks []copyop.Task, logger *log.Logger, doVerify bool, workers int, events chan<- copyop.FileProgress, result chan<- int) tea.Cmd {
+func runBatchCmd(ctx context.Context, tasks []copyop.Task, logger *log.Logger, doVerify bool, writeTimeout time.Duration, workers int, events chan<- copyop.FileProgress, result chan<- int) tea.Cmd {
 	return func() tea.Msg {
-		result <- copyop.RunBatchParallel(ctx, tasks, logger, doVerify, workers, events)
+		result <- copyop.RunBatchParallel(ctx, tasks, logger, doVerify, writeTimeout, workers, events)
 		return nil
 	}
 }
@@ -50,8 +50,8 @@ func preparePhase2Cmd(cfg *config.Config, logger *log.Logger) tea.Cmd {
 	}
 }
 
-// nasSyncTasks scans SSD and NAS fresh and returns the SSD→NAS copy tasks,
-// videos first (so large files are prioritised if the connection drops).
+// nasSyncTasks scans SSD and NAS fresh and returns the SSD→NAS copy tasks in
+// the configured transfer order (videos first by default).
 // Files whose NAS category root is unavailable are counted as skipped.
 // Category is decided by extension, so a merged SSD tree can be split onto
 // separate NAS roots and vice versa.
@@ -91,7 +91,19 @@ func nasSyncTasks(cfg *config.Config) (tasks []copyop.Task, skipped int) {
 	}
 	add(videos, "videos", nasVideoFiles)
 	add(photos, "photos", nasPhotoFiles)
+	orderTasks(tasks, cfg)
 	return tasks, skipped
+}
+
+// orderTasks applies the configured SSD→NAS transfer order: smallest files
+// first when nas_sync_order = "size-asc" (most likely to complete on a flaky
+// connection), otherwise videos first.
+func orderTasks(tasks []copyop.Task, cfg *config.Config) {
+	if cfg.SyncOrder() == config.OrderSizeAsc {
+		copyop.SortBySizeAsc(tasks)
+		return
+	}
+	sortVideosFirst(tasks, cfg)
 }
 
 func sortVideosFirst(tasks []copyop.Task, cfg *config.Config) {
@@ -253,6 +265,6 @@ func buildSyncTasks(missing []scan.FileInfo, cfg *config.Config, r *status.Statu
 		seen[key] = true
 		tasks = append(tasks, copyop.Task{Src: f, DstRoot: cfg.NASRoot(cat), DstRelPath: f.RelPath})
 	}
-	sortVideosFirst(tasks, cfg)
+	orderTasks(tasks, cfg)
 	return tasks, skipped
 }
