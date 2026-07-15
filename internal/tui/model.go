@@ -207,6 +207,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setTab(m.activeTab)
 		m.screen = screenMain
 		m.statusMsg = ""
+		if msg.result.CameraUnstable > 0 {
+			m.statusMsg = fmt.Sprintf("%d camera file(s) skipped — possibly still being written; rescan when the card is idle.", msg.result.CameraUnstable)
+		}
 		return m, m.maybeLoadThumb()
 
 	case deviceChangedMsg:

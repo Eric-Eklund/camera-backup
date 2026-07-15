@@ -85,6 +85,28 @@ func Walk(root string, exts []string) ([]FileInfo, error) {
 	return files, err
 }
 
+// StableAge is the minimum age of a source file's modtime before it is
+// considered fully written and safe to copy.
+const StableAge = 10 * time.Second
+
+// SplitStable partitions files into those safe to copy and those whose
+// modtime is within minAge of now — i.e. probably still being written to the
+// card. Copying a file mid-write risks a truncated destination, and once the
+// writer restores the real timestamp the file would be copied again under a
+// second date directory. Modtimes far in the future (e.g. a camera clock set
+// wrong) are treated as stable — such files are not being written right now.
+func SplitStable(files []FileInfo, now time.Time, minAge time.Duration) (stable, unstable []FileInfo) {
+	for _, f := range files {
+		age := now.Sub(f.ModTime)
+		if age < minAge && age > -minAge {
+			unstable = append(unstable, f)
+		} else {
+			stable = append(stable, f)
+		}
+	}
+	return stable, unstable
+}
+
 // SplitByCategory partitions files into photos and videos using categoryFn
 // (which normally wraps config.Category, i.e. classification by extension).
 func SplitByCategory(files []FileInfo, categoryFn func(FileInfo) string) (photos, videos []FileInfo) {
@@ -141,7 +163,17 @@ func IndexByKey(files []FileInfo) map[string]FileInfo {
 // saving the file with a _N suffix. On later runs the original key still
 // mismatches by size, so the _N variants are probed too — otherwise the same
 // file would be copied again on every run, creating _2, _3, … forever.
+//
+// A source whose modtime changed after it was copied (e.g. a file manager
+// writing to the card and restoring the timestamp afterwards) computes a
+// different date path. To avoid duplicating it under the new date, a file
+// whose basename and size already exist anywhere in the destination tree is
+// also skipped.
 func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
+	byNameSize := make(map[string]struct{}, len(dstIndex))
+	for _, d := range dstIndex {
+		byNameSize[nameSizeKey(d.RelPath, d.Size)] = struct{}{}
+	}
 	var out []FileInfo
 	for _, f := range src {
 		key := f.DestKey()
@@ -152,9 +184,18 @@ func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
 		if found && collisionCopyExists(key, f.Size, dstIndex) {
 			continue
 		}
+		if _, ok := byNameSize[nameSizeKey(f.RelPath, f.Size)]; ok {
+			continue
+		}
 		out = append(out, f)
 	}
 	return out
+}
+
+// nameSizeKey identifies a file by lowercased basename and size, independent
+// of which date directory it sits in.
+func nameSizeKey(relPath string, size int64) string {
+	return fmt.Sprintf("%s|%d", strings.ToLower(path.Base(relPath)), size)
 }
 
 // collisionCopyExists reports whether a _N collision variant of key exists in

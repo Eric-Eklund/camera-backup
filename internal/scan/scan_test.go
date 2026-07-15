@@ -183,6 +183,68 @@ func TestMissingFromDest_IncludeWhenCollisionCopyDiffers(t *testing.T) {
 	}
 }
 
+func TestMissingFromDest_SkipSameNameSizeUnderOtherDate(t *testing.T) {
+	// The file was copied while a file manager was still writing it to the
+	// card, so it landed under the write-time date. After the manager restored
+	// the real modtime the date key differs — but the same basename+size is
+	// already in the tree, so it must NOT be copied again.
+	modtime := time.Date(2026, 4, 3, 9, 52, 34, 0, time.UTC)
+	src := []scan.FileInfo{fi("DSC_2729.MOV", 1024, modtime)}
+	dstIndex := map[string]scan.FileInfo{
+		"2026/2026-07/2026-07-06/dsc_2729.mov": fi("2026/2026-07/2026-07-06/DSC_2729.MOV", 1024, time.Date(2026, 7, 6, 20, 1, 4, 0, time.UTC)),
+	}
+
+	missing := scan.MissingFromDest(src, dstIndex)
+	if len(missing) != 0 {
+		t.Errorf("len = %d, want 0 (same basename+size exists under another date)", len(missing))
+	}
+}
+
+func TestMissingFromDest_IncludeSameNameOtherDateDifferentSize(t *testing.T) {
+	// Same basename under another date but a different size is a different
+	// file (e.g. frame counter wrapped) — it must still be copied.
+	modtime := time.Date(2026, 4, 3, 9, 52, 34, 0, time.UTC)
+	src := []scan.FileInfo{fi("DSC_2729.MOV", 2048, modtime)}
+	dstIndex := map[string]scan.FileInfo{
+		"2026/2026-07/2026-07-06/dsc_2729.mov": fi("2026/2026-07/2026-07-06/DSC_2729.MOV", 1024, time.Date(2026, 7, 6, 20, 1, 4, 0, time.UTC)),
+	}
+
+	missing := scan.MissingFromDest(src, dstIndex)
+	if len(missing) != 1 {
+		t.Errorf("len = %d, want 1 (same name elsewhere but different size)", len(missing))
+	}
+}
+
+// ── SplitStable ───────────────────────────────────────────────────────────────
+
+func TestSplitStable(t *testing.T) {
+	now := time.Date(2026, 7, 6, 20, 1, 23, 0, time.UTC)
+	old := fi("old.MOV", 1, now.Add(-48*time.Hour))
+	justWritten := fi("hot.MOV", 1, now.Add(-3*time.Second))
+	slightlyFuture := fi("future.MOV", 1, now.Add(3*time.Second))
+	farFuture := fi("camclock.NEF", 1, now.Add(2*time.Hour)) // wrong camera clock — stable
+
+	stable, unstable := scan.SplitStable(
+		[]scan.FileInfo{old, justWritten, slightlyFuture, farFuture},
+		now, scan.StableAge)
+
+	if len(stable) != 2 || len(unstable) != 2 {
+		t.Fatalf("stable=%d unstable=%d, want 2/2", len(stable), len(unstable))
+	}
+	if stable[0].RelPath != "old.MOV" || stable[1].RelPath != "camclock.NEF" {
+		t.Errorf("stable = %v", []string{stable[0].RelPath, stable[1].RelPath})
+	}
+}
+
+func TestSplitStable_AllStable(t *testing.T) {
+	now := time.Now()
+	files := []scan.FileInfo{fi("a.NEF", 1, now.Add(-time.Hour))}
+	stable, unstable := scan.SplitStable(files, now, scan.StableAge)
+	if len(stable) != 1 || len(unstable) != 0 {
+		t.Errorf("stable=%d unstable=%d, want 1/0", len(stable), len(unstable))
+	}
+}
+
 // ── MissingByRelPath ──────────────────────────────────────────────────────────
 
 func TestMissingByRelPath_NewFile(t *testing.T) {
