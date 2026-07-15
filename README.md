@@ -150,7 +150,9 @@ copy/sync/verify with live parallel progress bars.
 
 ## Configuration
 
-Place `config.toml` next to the binary, or pass `--config <path>`.
+Copy `config-template.toml` to `config.toml` next to the binary (or pass
+`--config <path>`) and adjust the paths. `config.toml` is gitignored, so your
+local paths stay out of version control.
 
 ```toml
 source     = "/media/eric/NIKON"      # Camera / memory card (mount point)
@@ -245,7 +247,8 @@ cd camera-backup
 go build -o camera-backup ./cmd/camera-backup
 ```
 
-Copy the `camera-backup` binary and `config.toml` to a directory of your choice and run from any terminal. For RAW (.NEF) previews in the TUI, install `exiftool`.
+Copy the `camera-backup` binary and your `config.toml` (created from
+`config-template.toml`) to a directory of your choice and run from any terminal. For RAW (.NEF) previews in the TUI, install `exiftool`.
 
 ---
 
@@ -269,7 +272,7 @@ camera-backup/
 │   ├── config.toml          # Config pointing at testdata directories
 │   ├── make_testdata.go     # Generator for synthetic test files
 │   └── .gitignore
-├── config.toml              # User configuration (edit this)
+├── config-template.toml     # Configuration template (copy → config.toml)
 ├── go.mod
 └── go.sum
 ```
