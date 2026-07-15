@@ -1,0 +1,21 @@
+# camera-backup configuration template.
+# Copy this file to config.toml next to the binary (or pass --config <path>)
+# and adjust the paths for your system. config.toml is gitignored — your
+# local paths stay out of version control.
+
+source = "/run/media/user/CAMERA-CARD" # Camera / memory card (mount point)
+
+# Destination roots — one per category. Point photos and videos at the same
+# path to merge them into one tree.
+ssd_photos = "/mnt/ssd/Photos" # Local SSD destination for photos
+ssd_videos = "/mnt/ssd/Videos" # Local SSD destination for videos
+nas_photos = "/mnt/nas/Photos" # NAS photos (SMB/NFS, or WireGuard VPN) — optional, set both or neither
+nas_videos = "/mnt/nas/Videos" # NAS videos
+
+file_extensions = [".MOV", ".NEF", ".JPG", ".MP4"]
+
+video_extensions = [".MOV", ".MP4"] # these route to the videos destination; everything else goes to photos
+
+# Parallel copy workers used by the TUI (optional)
+#ssd_workers = 3 # camera → SSD (default 3)
+#nas_workers = 1 # SSD → NAS   (default 1)

@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
@@ -29,6 +30,10 @@ type StatusResult struct {
 	CameraFiles []scan.FileInfo
 	SSDFiles    []scan.FileInfo // combined photos+videos roots (single scan when merged)
 	NASFiles    []scan.FileInfo
+
+	// CameraUnstable counts camera files skipped this scan because their
+	// modtime is within scan.StableAge of now — probably still being written.
+	CameraUnstable int
 
 	// Per-root file lists, for lookups against a file's designated root.
 	// For merged roots both slices are the same scan.
@@ -91,6 +96,12 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 		r.CameraFiles, err = scan.Walk(cfg.Source, exts)
 		if err != nil {
 			return nil, err
+		}
+		var unstable []scan.FileInfo
+		r.CameraFiles, unstable = scan.SplitStable(r.CameraFiles, time.Now(), scan.StableAge)
+		r.CameraUnstable = len(unstable)
+		if r.CameraUnstable > 0 {
+			logger.Printf("Camera: %d file(s) skipped — modified within %s of scan, possibly still being written", r.CameraUnstable, scan.StableAge)
 		}
 		logger.Printf("Camera: %d files found", len(r.CameraFiles))
 	}
@@ -183,6 +194,10 @@ func Run(cfg *config.Config, logger *log.Logger) error {
 	nasInfo := ui.SpaceInfo{Avail: r.NASAvail(), ToBytes: totalSize(r.MissingOnNAS), FreeBytes: minFree(r.NASPhotosFree, r.NASVideosFree)}
 
 	ui.PrintSummary(len(r.CameraFiles), totalSize(r.CameraFiles), len(r.MissingOnSSD), len(r.MissingOnNAS), ssdInfo, nasInfo, r.NASAvail())
+
+	if r.CameraUnstable > 0 {
+		ui.Yellow.Printf("  ⚠️  %d camera file(s) skipped — modified moments ago, possibly still being written. Re-run when the card is idle.\n", r.CameraUnstable)
+	}
 
 	logger.Printf("status: %d camera files, %d missing from SSD (%s), %d missing from NAS (%s)",
 		len(r.CameraFiles),

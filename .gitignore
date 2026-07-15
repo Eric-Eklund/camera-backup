@@ -2,6 +2,9 @@
 /camera-backup
 camera-backup.exe
 
+# Local configuration (copy config-template.toml → config.toml)
+/config.toml
+
 # Logs
 logs/
 

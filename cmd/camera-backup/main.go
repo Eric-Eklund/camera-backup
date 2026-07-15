@@ -236,6 +236,11 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 		if err != nil {
 			return err
 		}
+		cameraFiles, unstable := scan.SplitStable(cameraFiles, time.Now(), scan.StableAge)
+		if len(unstable) > 0 {
+			ui.Yellow.Printf("  ⚠️  %d file(s) skipped — modified moments ago, possibly still being written. Re-run when the card is idle.\n", len(unstable))
+			logger.Printf("Phase 1: %d file(s) skipped — modtime within %s of scan", len(unstable), scan.StableAge)
+		}
 		camPhotos, camVideos := scan.SplitByCategory(cameraFiles, categoryFn)
 		ssdPhotoFiles, ssdVideoFiles := scan.WalkDual(cfg.SSDPhotos, cfg.SSDVideos, exts)
 
