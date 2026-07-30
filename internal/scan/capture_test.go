@@ -88,6 +88,36 @@ func TestCaptureTimeTIFF(t *testing.T) {
 	}
 }
 
+// TestCaptureTimeRAF covers Fujifilm's container, which is not TIFF: the header
+// points at a wrapped JPEG whose EXIF carries the date.
+func TestCaptureTimeRAF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "DSCF0001.RAF")
+	if err := os.WriteFile(path, buildRAF(t, "2024:10:12 21:01:01"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := CaptureTime(path)
+	if !ok {
+		t.Fatal("CaptureTime not ok")
+	}
+	want := time.Date(2024, 10, 12, 21, 1, 1, 0, time.Local)
+	if !got.Equal(want) {
+		t.Errorf("CaptureTime = %v, want %v", got, want)
+	}
+}
+
+// TestCaptureTimeRAFBadOffset keeps a corrupt header from being read as a date.
+func TestCaptureTimeRAFBadOffset(t *testing.T) {
+	raf := buildRAF(t, "2024:10:12 21:01:01")
+	binary.BigEndian.PutUint32(raf[rafJPEGOffset:], 0) // no JPEG recorded
+	path := filepath.Join(t.TempDir(), "broken.RAF")
+	if err := os.WriteFile(path, raf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := CaptureTime(path); ok {
+		t.Errorf("CaptureTime = %v, want not ok", got)
+	}
+}
+
 // TestCaptureTimeMOV covers the video path — a Nikon MOV carries its recording
 // time in the moov/mvhd atom, not in EXIF.
 func TestCaptureTimeMOV(t *testing.T) {
@@ -413,4 +443,17 @@ func TestMissingFromDest_PreservesSourceOrder(t *testing.T) {
 			t.Fatalf("missing = %v, want %v (source order)", got, want)
 		}
 	}
+}
+
+// buildRAF wraps a JPEG in a Fujifilm RAF container: the "FUJIFILM" magic, then
+// the wrapped JPEG's offset and length at 0x54, big-endian.
+func buildRAF(t testing.TB, date string) []byte {
+	t.Helper()
+	jpg := buildJPEG(t, date, false)
+	const headerLen = 0x5c
+	out := make([]byte, headerLen)
+	copy(out, "FUJIFILMCCD-RAW 0201FF129502")
+	binary.BigEndian.PutUint32(out[rafJPEGOffset:], uint32(headerLen))
+	binary.BigEndian.PutUint32(out[rafJPEGOffset+4:], uint32(len(jpg)))
+	return append(out, jpg...)
 }

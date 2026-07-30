@@ -94,38 +94,43 @@ func decodeFile(absPath string) (image.Image, error) {
 }
 
 // extractEmbedded tries each tag in order and returns the first embedded image
-// that decodes. A tag that is absent (empty output) or holds data this build
-// cannot decode is skipped rather than failing the whole lookup.
+// that decodes.
 func extractEmbedded(absPath string, tags []string) (image.Image, error) {
 	tool, err := exiftoolPath()
 	if err != nil {
 		return nil, ErrNoRAWTool
 	}
+	return firstDecodable(tags, func(tag string) []byte {
+		out, err := exec.Command(tool, "-b", tag, absPath).Output()
+		if err != nil {
+			return nil
+		}
+		return out
+	})
+}
+
+// firstDecodable walks tags in order and returns the first one whose bytes
+// decode as an image. A tag that is absent (get returns nothing, which is what
+// exiftool does for NEF's ThumbnailImage) or that holds data this build cannot
+// decode must not end the search — giving up on the first empty tag is exactly
+// why NEF thumbnails were blank. The first decode error is reported only when
+// no tag produced an image at all.
+func firstDecodable(tags []string, get func(tag string) []byte) (image.Image, error) {
 	var firstErr error
 	for _, tag := range tags {
-		img, err := extractRAWTag(tool, absPath, tag)
-		if img != nil {
+		out := get(tag)
+		if len(out) == 0 {
+			continue
+		}
+		img, _, err := image.Decode(bytes.NewReader(out))
+		if err == nil {
 			return img, nil
 		}
-		if err != nil && firstErr == nil {
+		if firstErr == nil {
 			firstErr = err
 		}
 	}
 	return nil, firstErr
-}
-
-// extractRAWTag runs `exiftool -b <tag>` and decodes the result.
-// A missing tag yields (nil, nil) so the caller can try the next one.
-func extractRAWTag(tool, absPath, tag string) (image.Image, error) {
-	out, err := exec.Command(tool, "-b", tag, absPath).Output()
-	if err != nil || len(out) == 0 {
-		return nil, nil
-	}
-	img, _, err := image.Decode(bytes.NewReader(out))
-	if err != nil {
-		return nil, err
-	}
-	return img, nil
 }
 
 var (

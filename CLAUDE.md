@@ -193,6 +193,22 @@ must never overstate what it checked:
 - Only extensions in `file_extensions` are seen, by `verify` exactly as by
   `status` and `copy`. A file type left out of the list is invisible everywhere.
 
+`TestCopyAndVerifyAgree` (verify package) is what keeps the two from drifting:
+for each scenario it asserts *both* that `scan.MissingFromDest` skips the source
+and that `verify` does not report it missing. Removing the capture-time check
+from either side fails it, and the message says which side moved.
+
+### Testing without camera files
+
+The RAW samples that prove the preview chain are megabytes each and live outside
+the repo: point `CAMERA_BACKUP_RAW_SAMPLES` at a directory of them and
+`TestThumbnailNEF` runs, otherwise it skips. Nothing else needs them —
+`firstDecodable` takes a tag→bytes getter, so the fallback order and the
+skip-an-empty-tag behaviour (the actual NEF bug) are tested with synthesised
+JPEG/TIFF payloads and no exiftool. Capture-time parsing likewise builds its own
+JPEG, TIFF, RAF and MP4 fixtures (`buildJPEG`, `buildTIFF`, `buildRAF`,
+`buildMOV` in `capture_test.go`).
+
 Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also probes basename+size **anywhere** in the destination tree — an old backup, or a source-modtime change on a file with no capture metadata, must not duplicate the file under a second date directory — but only skips on that evidence once the capture times agree; see "Is this destination file the same photograph?" above.
 
 Source files whose modtime is within `scan.StableAge` (10 s) of the scan are treated as still being written and skipped with a warning (`scan.SplitStable`, applied in `runCopy`, `runDirect` and `status.Compute` → `StatusResult.CameraUnstable`); copying mid-write would produce a truncated destination. Far-future modtimes (wrong camera clock) are treated as stable.
