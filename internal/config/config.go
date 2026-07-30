@@ -218,29 +218,38 @@ Note: destinations no longer get an automatic photos/ or videos/ subdirectory â€
 point the keys at your existing <root>/photos and <root>/videos directories`,
 			cfg.LegacySSD+"/photos", cfg.LegacySSD+"/videos")
 	}
-	if cfg.Source == "" {
-		return nil, fmt.Errorf("config: source path is required")
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// Validate checks the combination of keys for consistency. Shared by Load and
+// by the TUI's settings screen, which validates edits before writing them back.
+func (c *Config) Validate() error {
+	if c.Source == "" {
+		return fmt.Errorf("config: source path is required")
 	}
 	// The SSD is required unless it is bypassed by direct_to_nas â€” but a lone
 	// key is a mistake either way.
-	if (cfg.SSDPhotos == "") != (cfg.SSDVideos == "") {
-		return nil, fmt.Errorf("config: set both ssd_photos and ssd_videos (use the same path to merge), or neither")
+	if (c.SSDPhotos == "") != (c.SSDVideos == "") {
+		return fmt.Errorf("config: set both ssd_photos and ssd_videos (use the same path to merge), or neither")
 	}
-	if !cfg.DirectToNAS && !cfg.SSDConfigured() {
-		return nil, fmt.Errorf("config: ssd_photos and ssd_videos are both required (use the same path to merge), or set direct_to_nas = true to dump straight to the NAS")
+	if !c.DirectToNAS && !c.SSDConfigured() {
+		return fmt.Errorf("config: ssd_photos and ssd_videos are both required (use the same path to merge), or set direct_to_nas = true to dump straight to the NAS")
 	}
 	// NAS is optional, but a lone key is almost certainly a mistake.
-	if (cfg.NASPhotos == "") != (cfg.NASVideos == "") {
-		return nil, fmt.Errorf("config: set both nas_photos and nas_videos (use the same path to merge), or neither")
+	if (c.NASPhotos == "") != (c.NASVideos == "") {
+		return fmt.Errorf("config: set both nas_photos and nas_videos (use the same path to merge), or neither")
 	}
 	// direct_to_nas has nowhere to copy to without a NAS.
-	if cfg.DirectToNAS && !cfg.NASConfigured() {
-		return nil, fmt.Errorf("config: direct_to_nas requires nas_photos and nas_videos (use the same path to merge)")
+	if c.DirectToNAS && !c.NASConfigured() {
+		return fmt.Errorf("config: direct_to_nas requires nas_photos and nas_videos (use the same path to merge)")
 	}
-	if cfg.NASSyncOrder != "" && cfg.NASSyncOrder != OrderVideosFirst && cfg.NASSyncOrder != OrderSizeAsc {
-		return nil, fmt.Errorf("config: nas_sync_order must be %q or %q", OrderVideosFirst, OrderSizeAsc)
+	if c.NASSyncOrder != "" && c.NASSyncOrder != OrderVideosFirst && c.NASSyncOrder != OrderSizeAsc {
+		return fmt.Errorf("config: nas_sync_order must be %q or %q", OrderVideosFirst, OrderSizeAsc)
 	}
-	return &cfg, nil
+	return nil
 }
 
 func normalise(exts []string) []string {

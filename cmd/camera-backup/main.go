@@ -586,7 +586,7 @@ func newTUICmd(configPath *string) *cobra.Command {
 				return err
 			}
 
-			m := tui.New(cfg, logger)
+			m := tui.New(cfg, logger, *configPath)
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			m.SetProgram(p)
 			_, err = p.Run()

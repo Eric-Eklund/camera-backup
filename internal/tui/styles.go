@@ -63,4 +63,19 @@ var (
 
 	styleDetailLabel = styleDim
 	styleDetailValue = lipgloss.NewStyle().Foreground(colorWhite)
+
+	// Settings screen: the value being typed, and its block cursor.
+	styleEditText = lipgloss.NewStyle().Foreground(colorWhite)
+
+	styleEditCursor = lipgloss.NewStyle().
+			Foreground(colorBg).
+			Background(colorYellow)
+
+	styleFieldValue = lipgloss.NewStyle().Foreground(colorWhite)
+
+	styleFieldLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("#d1d5db"))
+
+	// Focused label: bold, but no padding — the settings rows align on a fixed
+	// label column, so any padding would shift the row out of line.
+	styleFieldLabelFocus = lipgloss.NewStyle().Bold(true).Foreground(colorWhite)
 )

@@ -189,12 +189,58 @@ copy/sync/verify with live parallel progress bars.
 - `?` opens a help screen with all keybindings, `v` runs verify, `q` quits
 - Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
+- `c` opens a **settings screen** that edits config.toml in place — see below
 - Devices are watched — plugging in the SD card (or any `extra_sources` device)
   refreshes the view automatically
 - Copies to the NAS honour `nas_write_timeout_seconds` (a hung mount fails the
   file, not the batch) and `nas_sync_order` from config.toml
 - With `direct_to_nas = true` the SSD column and tab disappear, the device
   header reads `Source → NAS`, and `y` dumps straight to the NAS (verified)
+
+#### Settings screen (`c`)
+
+Every config.toml key can be edited without leaving the TUI — paths, the
+`direct_to_nas` toggle, extension lists, worker counts, the write timeout and
+the transfer order:
+
+```
+╭─ Settings • ───────────────────────────────────────────────────────────╮
+│  ▶ Source device         /run/media/eric/NIKON              ✔ found    │
+│    Extra sources         /run/media/eric/EXT-SSD            1/1 mounted│
+│    Direct to NAS         [✔] on                                        │
+│    SSD photos            (not set)                          unset      │
+│    NAS photos            /mnt/nas/Photos                    ✔ found    │
+│    NAS transfer order    videos-first                                  │
+│                                                                        │
+│  direct_to_nas — bypass the local SSD — dump straight to the NAS       │
+│  Unsaved changes                                                       │
+╰────────────────────────────────────────────────────────────────────────╯
+ [j/k] move  [enter] edit/toggle  [s] save  [r] reload  [esc] back
+```
+
+- `j/k` moves, `enter` (or `space`) edits a path, flips a toggle, or cycles an
+  enum. While editing: `←/→`, `home`/`end`, `ctrl+u` to clear, `enter` to
+  accept, `esc` to cancel
+- **Paths are probed as you type** — `✔ found` / `✘ missing` updates on every
+  keystroke, so a typo in a mount point is obvious before you save. Destination
+  roots count as found when their parent exists, since the root itself is
+  created on the first copy
+- `s` saves. The edit is validated first (the same rules `config.Load` applies),
+  so an impossible combination — dropping the SSD roots without turning on
+  `direct_to_nas`, say — is reported and **nothing is written**
+- After a save the TUI adopts the new config immediately: devices are rescanned
+  against the new paths and the device watcher follows them. No restart
+- `r` reloads from disk, discarding edits. Leaving with unsaved changes takes a
+  second `esc` (the title shows `Settings •` while dirty)
+
+Saving is a **surgical rewrite** of config.toml: each key is updated on the line
+where it already sits, so your comments, ordering and any keys this tool does
+not manage survive untouched. Keys the file did not have are appended under an
+`# Added by the settings screen` heading. The write is atomic, so an interrupted
+save cannot leave a truncated config.
+
+Optional keys are written as their effective values — after the first save the
+file states explicitly what the tool is doing rather than relying on defaults.
 
 ---
 
@@ -203,6 +249,9 @@ copy/sync/verify with live parallel progress bars.
 Copy `config-template.toml` to `config.toml` next to the binary (or pass
 `--config <path>`) and adjust the paths. `config.toml` is gitignored, so your
 local paths stay out of version control.
+
+Everything below can also be edited from the TUI's settings screen (`c`) instead
+of by hand — see [Settings screen](#settings-screen-c).
 
 ```toml
 source     = "/media/eric/NIKON"      # Camera / memory card (mount point)

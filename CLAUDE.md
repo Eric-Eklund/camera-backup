@@ -48,14 +48,14 @@ Six subcommands (Cobra CLI):
 | Package | Role |
 |---|---|
 | `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` + `runDirect()` orchestration, logging init |
-| `internal/config` | TOML loading, extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SSDInUse()` |
+| `internal/config` | TOML loading + `Validate()` + `Save()` (comment-preserving write-back), extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SSDInUse()` |
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
 | `internal/checksum` | SHA256 with optional progress writer |
 | `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI |
 | `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
 | `internal/preview` | Thumbnails (JPEG direct, NEF via exiftool), ANSI block art, Kitty Graphics Protocol |
-| `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher |
+| `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher, settings screen (`settings.go`) |
 | `internal/ui` | Terminal colors, progress bar, `Prompt()`, `AskYesNo()`, `FreeSpace()` |
 
 ### Source devices
@@ -137,6 +137,40 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 - All copy batches are launched through `Model.launchBatch` (progress reset, screen switch, worker pool + drain wiring) — add new modes there rather than duplicating the plumbing
 - Kitty graphics used for full-screen preview when `KittySupported()` (Ghostty/Kitty); block-art fallback otherwise; RAW previews need exiftool in PATH
 
+### Settings screen
+
+`c` on the main screen opens `screenSettings` — an editable view of config.toml
+(`internal/tui/settings.go` for the form, `renderSettings` in view.go for the
+rendering). `tui.New` takes the config path for it; `""` makes it read-only.
+
+- `settingsForm` holds an editable copy as strings, one `settingsField` per TOML
+  key. `toConfig()` parses them onto a copy of the running config and returns the
+  draft. Field-level input rules (empty required field, non-numeric count, empty
+  `file_extensions`) live in `toConfig`; every cross-key rule comes from
+  `config.Validate()` — do not duplicate those.
+- Optional keys are seeded from their *effective* accessors (`SSDWorkerCount()`,
+  `NASWriteTimeout()`, `SyncOrder()`), so the screen never shows a blank for a
+  setting that is in force — and a save then writes those values explicitly.
+- Path fields render a live `✔/✘` from `markerFor(value)`, which is passed the
+  *in-progress editor text* rather than the field value, so feedback tracks
+  keystrokes. Source paths must exist; destination roots use
+  `config.RootAvailable` (parent counts).
+- `config.Save()` is a line-oriented rewrite, not a re-encode: it replaces each
+  key where it already appears (uncommenting it, keeping trailing comments) and
+  appends only what is missing, writing atomically via a temp file + rename.
+  `findAssignment` deliberately rewrites exactly one line and prefers a live
+  assignment over a commented one, so prose that looks like `# key = value` is
+  never turned into config.
+- After a successful save `saveSettings()` swaps `m.cfg`, calls
+  `restartWatcher()` (the watcher takes a stop channel so it can follow new
+  paths) and issues a fresh `statusScanCmd` — edited paths take effect without a
+  restart. `statusReadyMsg`/`deviceChangedMsg` are therefore accepted on
+  `screenSettings`, and the handler must not switch the screen to `screenMain`
+  there.
+- `lineEditor` is a hand-rolled single-line editor (rune buffer + cursor, with a
+  scrolling render window). Deliberate: no `bubbles` dependency, matching how
+  this package already draws its own panels and progress bars.
+
 ### Verifying TUI changes
 
 Run the TUI headless in tmux against generated testdata and inspect the actual rendering:
@@ -154,6 +188,10 @@ tmux kill-server
 - To exercise progress/cancel/ETA, drop large files into the camera testdata first:
   `dd if=/dev/urandom of=testdata/camera/DCIM/100NIKON/BIG_0001.MOV bs=1M count=300`
 - Reset testdata between runs: `rm -rf testdata/camera testdata/ssd testdata/nas`
+- For the settings screen, copy testdata/config.toml somewhere writable and run
+  against the copy — `s` rewrites the file in place. Worth checking after a save:
+  the header/tabs/hints reflect the new config, the file kept its comments, and
+  an invalid edit leaves the file byte-identical
 
 ### Platform-specific files
 

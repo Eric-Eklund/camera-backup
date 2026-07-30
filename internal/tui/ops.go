@@ -179,7 +179,9 @@ func drainProgressCmd(events <-chan copyop.FileProgress, result <-chan int, p *t
 
 // watchDevicesCmd starts an fsnotify watcher on the parent directories of the configured
 // device paths. When a CREATE or REMOVE event is detected it sends a DeviceChangedMsg.
-func watchDevicesCmd(cfg *config.Config, p *tea.Program) tea.Cmd {
+// The watcher runs until stop is closed, which is how a config change swaps it
+// for one watching the new paths.
+func watchDevicesCmd(cfg *config.Config, p *tea.Program, stop <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		// Every source candidate is watched, so swapping a card for an external
 		// drive triggers a rescan whichever one the user plugs in.
@@ -199,6 +201,8 @@ func watchDevicesCmd(cfg *config.Config, p *tea.Program) tea.Cmd {
 			defer watcher.Close()
 			for {
 				select {
+				case <-stop:
+					return
 				case ev, ok := <-watcher.Events:
 					if !ok {
 						return

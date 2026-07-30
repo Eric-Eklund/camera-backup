@@ -182,7 +182,7 @@ func (m *Model) renderStatusBar() string {
 		copyHint = "[y] dump → NAS"
 	}
 	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [g] grid  " +
-		copyHint + "  [v] verify  [?] help  [q] quit"
+		copyHint + "  [v] verify  [c] settings  [?] help  [q] quit"
 	if n := len(m.selected); n > 0 {
 		var selBytes int64
 		for _, f := range m.allFiles {
@@ -688,6 +688,107 @@ func (m *Model) renderVerifyProgress() string {
 	return sb.String()
 }
 
+// renderSettings renders the settings screen: one row per config key, with a
+// live ✔/✘ for every path so a mistyped mount point is obvious immediately.
+func (m *Model) renderSettings() string {
+	f := m.settings
+	if f == nil {
+		return m.screenFrame("Settings", "\n  Settings unavailable.", "[esc] back")
+	}
+
+	labelW := 20
+	markerW := 12
+	// Value column: whatever is left inside the frame after the label, marker
+	// and the padding between them.
+	valueW := m.width - labelW - markerW - 8
+	if valueW < 12 {
+		valueW = 12
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	for i, fl := range f.fields {
+		focused := i == f.cursor
+		editing := focused && f.editing
+
+		cursorMark := "  "
+		if focused {
+			cursorMark = styleWarn.Render("▶ ")
+		}
+
+		label := fmt.Sprintf("%-*s", labelW, truncate(fl.label, labelW))
+		if focused {
+			label = styleFieldLabelFocus.Render(label)
+		} else {
+			label = styleFieldLabel.Render(label)
+		}
+
+		// Probe the text being typed, not the last accepted value, so the ✔/✘
+		// tracks the keystrokes.
+		liveValue := fl.value
+		if editing {
+			liveValue = f.editor.String()
+		}
+
+		var value string
+		switch {
+		case editing:
+			value = f.editor.render(valueW)
+		case fl.kind == fieldBool:
+			value = renderToggle(fl.value)
+		case fl.value == "":
+			value = styleDim.Render("(not set)")
+		default:
+			value = styleFieldValue.Render(ansi.Truncate(fl.value, valueW, "…"))
+		}
+		pad := valueW - lipgloss.Width(value)
+		if pad < 1 {
+			pad = 1
+		}
+
+		sb.WriteString("  " + cursorMark + label + "  " + value + strings.Repeat(" ", pad) + fl.markerFor(liveValue) + "\n")
+	}
+
+	// Footer: the focused key's TOML name and hint, then status.
+	focused := f.fields[f.cursor]
+	sb.WriteString("\n  " + styleDim.Render(focused.key))
+	if focused.hint != "" {
+		sb.WriteString(styleDim.Render(" — " + focused.hint))
+	}
+	sb.WriteString("\n")
+
+	switch {
+	case f.err != "":
+		sb.WriteString("\n  " + styleErr.Render("✘ "+f.err) + "\n")
+	case f.notice != "":
+		sb.WriteString("\n  " + styleOK.Render("✔ "+f.notice) + "\n")
+	case f.confirmExit:
+		sb.WriteString("\n  " + styleWarn.Render("Unsaved changes — [s] save, or [esc] again to discard") + "\n")
+	case f.dirty:
+		sb.WriteString("\n  " + styleWarn.Render("Unsaved changes") + "\n")
+	default:
+		sb.WriteString("\n  " + styleDim.Render(f.configPath) + "\n")
+	}
+
+	title := "Settings"
+	if f.dirty {
+		title = "Settings •"
+	}
+	hint := "[j/k] move  [enter] edit/toggle  [s] save  [r] reload  [esc] back"
+	if f.editing {
+		hint = "[enter] accept  [esc] cancel  [ctrl+u] clear  [←→] move  typing edits the value"
+	}
+	return m.screenFrame(title, sb.String(), hint)
+}
+
+// renderToggle draws a boolean as a checkbox so its state reads at a glance.
+func renderToggle(value string) string {
+	if value == boolOn {
+		return styleOK.Render("[✔] on")
+	}
+	return styleDim.Render("[ ] off")
+}
+
 // renderHelp renders the keybinding reference screen.
 func (m *Model) renderHelp() string {
 	type binding struct{ keys, desc string }
@@ -713,6 +814,13 @@ func (m *Model) renderHelp() string {
 		{"Actions", []binding{
 			{"y", copyDesc},
 			{"v", "verify checksums (camera vs SSD vs NAS)"},
+			{"c", "settings — edit paths and options, saved to config.toml"},
+		}},
+		{"Settings screen", []binding{
+			{"enter / space", "edit a value · toggle · cycle choices"},
+			{"s · r", "save to config.toml · reload from it"},
+			{"ctrl+u", "clear the field while editing"},
+			{"esc", "cancel the edit, or leave the screen"},
 		}},
 		{"Grid & preview", []binding{
 			{"←→↑↓ / hjkl", "navigate thumbnails"},

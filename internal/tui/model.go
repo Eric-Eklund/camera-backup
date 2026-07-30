@@ -32,6 +32,7 @@ const (
 	screenDone            // completed
 	screenErrors          // error summary
 	screenHelp            // keybinding reference
+	screenSettings        // editable config.toml
 )
 
 type progressMode int
@@ -62,6 +63,13 @@ type Model struct {
 	cfg    *config.Config
 	logger *log.Logger
 	p      *tea.Program
+
+	// configPath is where the settings screen writes; empty disables editing.
+	configPath string
+	settings   *settingsForm
+	// watcherStop stops the running device watcher. Closed and replaced when
+	// the configured paths change, so the watcher follows the new ones.
+	watcherStop chan struct{}
 
 	screen        Screen
 	width, height int
@@ -140,11 +148,13 @@ const (
 	tabMissingOnNAS
 )
 
-// New creates a new TUI model.
-func New(cfg *config.Config, logger *log.Logger) *Model {
+// New creates a new TUI model. configPath is the config.toml the settings
+// screen saves to; pass "" to make the settings screen read-only.
+func New(cfg *config.Config, logger *log.Logger, configPath string) *Model {
 	return &Model{
 		cfg:          cfg,
 		logger:       logger,
+		configPath:   configPath,
 		screen:       screenLoading,
 		statusMsg:    "Scanning devices…",
 		thumbCache:   map[string]image.Image{},
@@ -168,8 +178,19 @@ func (m *Model) SetProgram(p *tea.Program) {
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		statusScanCmd(m.cfg, m.logger),
-		watchDevicesCmd(m.cfg, m.p),
+		m.restartWatcher(),
 	)
+}
+
+// restartWatcher stops any running device watcher and starts one for the
+// currently configured paths. Called at startup and whenever the settings
+// screen changes the paths, so a newly configured mount point is watched.
+func (m *Model) restartWatcher() tea.Cmd {
+	if m.watcherStop != nil {
+		close(m.watcherStop)
+	}
+	m.watcherStop = make(chan struct{})
+	return watchDevicesCmd(m.cfg, m.p, m.watcherStop)
 }
 
 // Update handles all messages.
@@ -184,9 +205,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case statusReadyMsg:
-		// Only apply on the loading/main screens — never yank the user out of a
-		// running operation, confirm dialog, or preview.
-		if m.screen != screenLoading && m.screen != screenMain {
+		// Only apply on the loading/main/settings screens — never yank the user
+		// out of a running operation, confirm dialog, or preview. The settings
+		// screen stays put: it triggers rescans itself after a save.
+		if m.screen != screenLoading && m.screen != screenMain && m.screen != screenSettings {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -206,7 +228,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.buildTabs()
 		m.setTab(m.activeTab)
-		m.screen = screenMain
+		if m.screen != screenSettings {
+			m.screen = screenMain
+		}
 		m.statusMsg = ""
 		if msg.result.CameraUnstable > 0 {
 			m.statusMsg = fmt.Sprintf("%d camera file(s) skipped — possibly still being written; rescan when the card is idle.", msg.result.CameraUnstable)
@@ -215,8 +239,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case deviceChangedMsg:
 		// Ignore device events during operations; a fresh scan runs when the
-		// user returns to the main screen anyway.
-		if m.screen != screenMain && m.screen != screenLoading {
+		// user returns to the main screen anyway. The settings screen accepts
+		// them so plugging a device in updates its ✔/✘ markers live.
+		if m.screen != screenMain && m.screen != screenLoading && m.screen != screenSettings {
 			return m, nil
 		}
 		m.statusMsg = "Rescanning…"
@@ -448,8 +473,130 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		}
+
+	case screenSettings:
+		return m.handleSettingsKey(msg)
 	}
 	return m, nil
+}
+
+// handleSettingsKey drives the settings screen. While a field is being typed
+// into, almost every key belongs to the editor — only enter and esc get out.
+func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	f := m.settings
+	if f == nil {
+		m.screen = screenMain
+		return m, nil
+	}
+
+	if f.editing {
+		switch msg.String() {
+		case "enter":
+			f.commitEdit()
+		case "esc":
+			f.cancelEdit()
+		case "ctrl+c":
+			return m, tea.Quit
+		case "ctrl+u":
+			f.editor.clear()
+		case "backspace":
+			f.editor.backspace()
+		case "delete":
+			f.editor.deleteForward()
+		case "left":
+			f.editor.left()
+		case "right":
+			f.editor.right()
+		case "home", "ctrl+a":
+			f.editor.home()
+		case "end", "ctrl+e":
+			f.editor.end()
+		default:
+			// Printable input only — ignore the rest so a stray control key
+			// cannot corrupt a path.
+			switch msg.Type {
+			case tea.KeyRunes:
+				f.editor.insert(msg.Runes)
+			case tea.KeySpace:
+				f.editor.insert([]rune{' '})
+			}
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "j", "down":
+		f.moveCursor(1)
+
+	case "k", "up":
+		f.moveCursor(-1)
+
+	case "enter", " ":
+		f.startEdit()
+
+	case "s":
+		return m, m.saveSettings()
+
+	case "r":
+		// Reload from disk, discarding edits.
+		cfg, err := config.Load(f.configPath)
+		if err != nil {
+			f.err = err.Error()
+			return m, nil
+		}
+		m.settings = newSettingsForm(cfg, f.configPath)
+		m.settings.notice = "Reloaded from " + f.configPath
+		return m, nil
+
+	case "esc", "q":
+		if f.dirty && !f.confirmExit {
+			f.confirmExit = true
+			f.err = ""
+			f.notice = ""
+			return m, nil
+		}
+		m.screen = screenMain
+		m.settings = nil
+	}
+	return m, nil
+}
+
+// saveSettings validates the form, writes config.toml, and adopts the result:
+// the device watcher is restarted on the new paths and a fresh scan is kicked
+// off, so edited paths take effect without restarting the TUI.
+func (m *Model) saveSettings() tea.Cmd {
+	f := m.settings
+	if f.configPath == "" {
+		f.err = "no config file path — cannot save"
+		return nil
+	}
+	draft, err := f.toConfig(m.cfg)
+	if err != nil {
+		f.err = err.Error()
+		f.notice = ""
+		return nil
+	}
+	if err := draft.Save(f.configPath); err != nil {
+		f.err = err.Error()
+		f.notice = ""
+		return nil
+	}
+
+	m.cfg = draft
+	f.dirty = false
+	f.confirmExit = false
+	f.err = ""
+	f.notice = "Saved to " + f.configPath + " — rescanning devices…"
+	m.logger.Printf("config saved to %s", f.configPath)
+
+	// Selections point at files from the previous scan, which a path change can
+	// make meaningless — start clean.
+	m.selected = map[string]bool{}
+	m.statusMsg = "Rescanning after config change…"
+	return tea.Batch(m.restartWatcher(), statusScanCmd(m.cfg, m.logger))
 }
 
 func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -529,6 +676,13 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case " ":
 		m.toggleSelect()
+
+	case "c", "C":
+		m.settings = newSettingsForm(m.cfg, m.configPath)
+		if m.configPath == "" {
+			m.settings.err = "started without a config file — settings are read-only"
+		}
+		m.screen = screenSettings
 
 	case "?":
 		m.helpReturn = screenMain
@@ -1222,6 +1376,8 @@ func (m *Model) View() string {
 		return m.renderErrors()
 	case screenHelp:
 		return m.renderHelp()
+	case screenSettings:
+		return m.renderSettings()
 	}
 	return ""
 }
