@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func run(t *testing.T, cfg *config.Config) map[string][]string {
 	t.Helper()
 	logger := log.New(io.Discard, "", 0)
 	issues := map[string][]string{}
-	err := verify.RunWithCallback(cfg, logger, func(done, total int, r verify.FileResult) {
+	_, err := verify.RunWithCallback(cfg, logger, func(done, total int, r verify.FileResult) {
 		if len(r.Issues) > 0 {
 			issues[r.RelPath] = r.Issues
 		}
@@ -196,5 +197,93 @@ func TestVerify_DifferentDateDifferentSizeIsMissing(t *testing.T) {
 	got := issues[filepath.ToSlash(filepath.Join("DCIM", "DSC_0010.JPG"))]
 	if len(got) != 1 || got[0] != "missing from SSD" {
 		t.Errorf("issues = %v, want [missing from SSD]", issues)
+	}
+}
+
+// runFull is like run but also returns the destinations verify could not check.
+func runFull(t *testing.T, cfg *config.Config) (map[string][]string, []string) {
+	t.Helper()
+	logger := log.New(io.Discard, "", 0)
+	issues := map[string][]string{}
+	skipped, err := verify.RunWithCallback(cfg, logger, func(done, total int, r verify.FileResult) {
+		if len(r.Issues) > 0 {
+			issues[r.RelPath] = r.Issues
+		}
+	})
+	if err != nil {
+		t.Fatalf("RunWithCallback: %v", err)
+	}
+	return issues, skipped
+}
+
+// TestVerify_ReportsUnmountedDestination is the honesty guard: a pass that never
+// looked at the NAS must not read as a clean bill of health for it.
+func TestVerify_ReportsUnmountedDestination(t *testing.T) {
+	cfg, cam, ssd := setup(t)
+	missingRoot := filepath.Join(t.TempDir(), "not-mounted")
+	cfg.NASPhotos = filepath.Join(missingRoot, "Photos")
+	cfg.NASVideos = filepath.Join(missingRoot, "Videos")
+
+	writeFile(t, filepath.Join(cam, "DCIM/DSC_0011.JPG"), "content")
+	writeFile(t, filepath.Join(ssd, datePath, "DSC_0011.JPG"), "content")
+
+	issues, skipped := runFull(t, cfg)
+	if len(issues) != 0 {
+		t.Errorf("issues = %v, want none — the SSD copy is fine", issues)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("skipped = %v, want both NAS roots reported", skipped)
+	}
+	for _, s := range skipped {
+		if !strings.Contains(s, "NAS") || !strings.Contains(s, missingRoot) {
+			t.Errorf("skipped entry %q should name the device and its path", s)
+		}
+	}
+}
+
+// TestVerify_MergedRootReportedOnce keeps the message readable when both
+// categories point at one directory.
+func TestVerify_MergedRootReportedOnce(t *testing.T) {
+	cfg, cam, ssd := setup(t)
+	// The parent must be gone too: a root whose parent exists counts as
+	// available, because the root itself is created on first copy.
+	merged := filepath.Join(t.TempDir(), "not-mounted", "share")
+	cfg.NASPhotos, cfg.NASVideos = merged, merged
+
+	writeFile(t, filepath.Join(cam, "DCIM/DSC_0012.JPG"), "content")
+	writeFile(t, filepath.Join(ssd, datePath, "DSC_0012.JPG"), "content")
+
+	_, skipped := runFull(t, cfg)
+	if len(skipped) != 1 {
+		t.Fatalf("skipped = %v, want the merged NAS root named once", skipped)
+	}
+}
+
+// TestVerify_NothingSkippedWhenAllMounted keeps the clean case clean — the
+// warning must not appear when there is nothing to warn about.
+func TestVerify_NothingSkippedWhenAllMounted(t *testing.T) {
+	cfg, cam, ssd := setup(t)
+	nas := t.TempDir()
+	cfg.NASPhotos, cfg.NASVideos = nas, nas
+
+	writeFile(t, filepath.Join(cam, "DCIM/DSC_0013.JPG"), "content")
+	writeFile(t, filepath.Join(ssd, datePath, "DSC_0013.JPG"), "content")
+	writeFile(t, filepath.Join(nas, datePath, "DSC_0013.JPG"), "content")
+
+	issues, skipped := runFull(t, cfg)
+	if len(issues) != 0 || len(skipped) != 0 {
+		t.Errorf("issues = %v, skipped = %v, want both empty", issues, skipped)
+	}
+}
+
+// TestVerify_UnconfiguredDeviceNotReported distinguishes "not set up" from
+// "set up but not mounted" — only the latter is a gap in the check.
+func TestVerify_UnconfiguredDeviceNotReported(t *testing.T) {
+	cfg, cam, ssd := setup(t) // no NAS keys at all
+	writeFile(t, filepath.Join(cam, "DCIM/DSC_0014.JPG"), "content")
+	writeFile(t, filepath.Join(ssd, datePath, "DSC_0014.JPG"), "content")
+
+	if _, skipped := runFull(t, cfg); len(skipped) != 0 {
+		t.Errorf("skipped = %v, want none — no NAS is configured", skipped)
 	}
 }

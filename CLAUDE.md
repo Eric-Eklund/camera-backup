@@ -170,7 +170,28 @@ decision — a source `copy` skips must be a source `verify` considers present:
 
 The residual gap is two frames shot on the **same day** with the same basename
 and a byte-exact size — the exact-date-path match accepts those without reading
-metadata. `verify` is what catches it.
+metadata. `verify` is what catches it: it hashes, so it reports the mismatch.
+
+### What verify does and does not cover
+
+`verify` is the backstop for everything the fast comparison approximates, so it
+must never overstate what it checked:
+
+- It hashes the **whole** file (`checksum.File`), on every side that is
+  available. Nothing is sampled.
+- It is **source-driven**: the authority is the camera/source, or the SSD when no
+  source is mounted. Destination files with no counterpart on the authority are
+  not examined — verifying a card checks that card's files, not the whole NAS.
+- An **unmounted destination is skipped, not failed** — the other destinations
+  are still worth checking. `verifyAll` therefore returns the configured roots it
+  could not compare against (`unmountedRoots`), and both the CLI and the TUI
+  print them beside the result. Without that, "All N files verified OK" stood for
+  a destination nothing had looked at. A root whose *parent* exists counts as
+  available (it is created on first copy), so the more common "share not mounted
+  under an existing mount point" case fails loudly instead: every file reports
+  `missing from NAS`.
+- Only extensions in `file_extensions` are seen, by `verify` exactly as by
+  `status` and `copy`. A file type left out of the list is invisible everywhere.
 
 Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also probes basename+size **anywhere** in the destination tree — an old backup, or a source-modtime change on a file with no capture metadata, must not duplicate the file under a second date directory — but only skips on that evidence once the capture times agree; see "Is this destination file the same photograph?" above.
 

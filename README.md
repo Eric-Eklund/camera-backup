@@ -179,6 +179,20 @@ By default only failures are printed:
 
 Pass `--verbose` / `-v` to see every file.
 
+A destination that is not mounted is skipped rather than failed — the others are
+still worth checking — but the result always says so, so a clean run can never
+stand for something that was never looked at:
+
+```
+  All 47 files verified OK against the destinations that were checked.
+  ⚠️  Not checked: NAS photos (/mnt/nas/Photos) — mount and re-run to verify there.
+```
+
+Two limits worth knowing. Verify is **source-driven**: it checks the files on
+the authority (the card, or the SSD when no card is connected), so verifying one
+card confirms that card's photos, not the whole NAS. And it only sees extensions
+listed in `file_extensions` — the same blind spot `status` and `copy` have.
+
 ### `camera-backup tui`
 
 Interactive terminal UI wrapping all commands. Shows device availability, a

@@ -40,6 +40,9 @@ type verifyFileMsg struct {
 
 type verifyDoneMsg struct {
 	bad, total int
+	// skipped names configured destinations that were not mounted, so the done
+	// screen never presents an unchecked destination as verified.
+	skipped []string
 }
 
 type thumbnailMsg struct {
