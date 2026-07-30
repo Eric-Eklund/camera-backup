@@ -52,7 +52,14 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
 
 ### `camera-backup status`
 
-Quick check — compares by filename and file size. Shows how much data needs to be copied and whether there is enough free space on each destination.
+Quick check — compares by shoot date, filename and file size rather than hashing. Shows how much data needs to be copied and whether there is enough free space on each destination.
+
+A file already sitting under its own shoot date with a matching size counts as
+backed up. When a copy turns up under a *different* date — an older backup, or a
+file with no capture metadata whose timestamp was rewritten — the match is
+confirmed against the capture time before the source is skipped, so two cards
+that both number a frame `DSC_0001` are never confused with each other. Use
+`camera-backup verify` when you want the full SHA256 comparison.
 
 ```
   Devices
@@ -171,6 +178,20 @@ By default only failures are printed:
 ```
 
 Pass `--verbose` / `-v` to see every file.
+
+A destination that is not mounted is skipped rather than failed — the others are
+still worth checking — but the result always says so, so a clean run can never
+stand for something that was never looked at:
+
+```
+  All 47 files verified OK against the destinations that were checked.
+  ⚠️  Not checked: NAS photos (/mnt/nas/Photos) — mount and re-run to verify there.
+```
+
+Two limits worth knowing. Verify is **source-driven**: it checks the files on
+the authority (the card, or the SSD when no card is connected), so verifying one
+card confirms that card's photos, not the whole NAS. And it only sees extensions
+listed in `file_extensions` — the same blind spot `status` and `copy` have.
 
 ### `camera-backup tui`
 

@@ -871,7 +871,11 @@ func (m *Model) renderHelp() string {
 func (m *Model) renderDone() string {
 	var sb strings.Builder
 	sb.WriteString("\n" + styleOK.Render("  Done!") + "\n\n")
-	sb.WriteString("  " + m.doneMsg + "\n")
+	// doneMsg can be several lines (an unmounted destination is listed under the
+	// result), so indent each one and keep it inside the frame.
+	for _, line := range strings.Split(m.doneMsg, "\n") {
+		sb.WriteString("  " + ansi.Truncate(line, m.width-6, "…") + "\n")
+	}
 
 	if m.failures > 0 {
 		sb.WriteString(styleErr.Render(fmt.Sprintf("\n  %d file(s) had errors.", m.failures)) + "\n")

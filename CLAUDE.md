@@ -135,12 +135,81 @@ bury a whole shoot under the date it was copied.
   seconds ago is still being written however old the shot inside it is. The
   destination copy is also still stamped with the source modtime.
 - Backups made before this existed sit under their modtime's date. Nothing
-  re-copies them: `MissingFromDest` already skips a source whose basename+size
-  exists anywhere in the destination tree. `verify` needs the same fallback and
-  gets it from `findCopy` (`scan.IndexByNameSize`) — without it every
-  previously backed-up file would be reported missing.
+  re-copies them: `MissingFromDest` also probes basename+size across the whole
+  destination tree. `verify` needs the same fallback and gets it from `findCopy`
+  (`scan.IndexByNameSize`) — without it every previously backed-up file would be
+  reported missing.
 
-Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also skips a source whose basename+size already exists **anywhere** in the destination tree — a source-modtime change (e.g. a file manager restoring timestamps after writing to the card) must not duplicate the file under a second date directory.
+### Is this destination file the same photograph?
+
+Basename+size is a weak identity for the cross-date probe above: three cards all
+number their first frame `DSC_0001`, and two of those frames can share a
+byte-exact size. Trusting the match alone silently skipped a photo that was
+never backed up — `status` said "0 missing" while `verify` reported a hash
+mismatch on the same file.
+
+Both paths therefore confirm a cross-date basename+size match against the
+**capture time** of the destination file, and both must keep making the same
+decision — a source `copy` skips must be a source `verify` considers present:
+
+- `MissingFromDest` is two-pass: pass 1 settles everything decidable from the
+  index alone and collects the ambiguous sources; pass 2 reads only those twins'
+  capture times (`captureTimesOf`, bounded pool, deduplicated by path). A
+  destination whose layout already matches costs **zero** reads. The split loses
+  the input ordering, so `sortBySrcOrder` restores it — `SortBySizeAsc` and the
+  videos-first sort are applied downstream and assume scan order.
+- `verify.findCopy` does the same check inline; it is already hashing every file,
+  so one header read is noise. Without it a different photograph would be hashed
+  and reported as a *mismatch* when the truth is "never copied".
+- Different capture times → different photographs → the source is copied. Equal,
+  or no capture time on either side → treated as the same file, as before. This
+  only ever skips *less* than the old rule, never more.
+- Benchmarks live in `missing_bench_test.go` (3000 files): steady state ~4.7 ms
+  with no destination reads, full migration ~20.5 ms, `WalkSource` ~41.9 ms vs
+  `Walk` ~12.7 ms.
+
+The residual gap is two frames shot on the **same day** with the same basename
+and a byte-exact size — the exact-date-path match accepts those without reading
+metadata. `verify` is what catches it: it hashes, so it reports the mismatch.
+
+### What verify does and does not cover
+
+`verify` is the backstop for everything the fast comparison approximates, so it
+must never overstate what it checked:
+
+- It hashes the **whole** file (`checksum.File`), on every side that is
+  available. Nothing is sampled.
+- It is **source-driven**: the authority is the camera/source, or the SSD when no
+  source is mounted. Destination files with no counterpart on the authority are
+  not examined — verifying a card checks that card's files, not the whole NAS.
+- An **unmounted destination is skipped, not failed** — the other destinations
+  are still worth checking. `verifyAll` therefore returns the configured roots it
+  could not compare against (`unmountedRoots`), and both the CLI and the TUI
+  print them beside the result. Without that, "All N files verified OK" stood for
+  a destination nothing had looked at. A root whose *parent* exists counts as
+  available (it is created on first copy), so the more common "share not mounted
+  under an existing mount point" case fails loudly instead: every file reports
+  `missing from NAS`.
+- Only extensions in `file_extensions` are seen, by `verify` exactly as by
+  `status` and `copy`. A file type left out of the list is invisible everywhere.
+
+`TestCopyAndVerifyAgree` (verify package) is what keeps the two from drifting:
+for each scenario it asserts *both* that `scan.MissingFromDest` skips the source
+and that `verify` does not report it missing. Removing the capture-time check
+from either side fails it, and the message says which side moved.
+
+### Testing without camera files
+
+The RAW samples that prove the preview chain are megabytes each and live outside
+the repo: point `CAMERA_BACKUP_RAW_SAMPLES` at a directory of them and
+`TestThumbnailNEF` runs, otherwise it skips. Nothing else needs them —
+`firstDecodable` takes a tag→bytes getter, so the fallback order and the
+skip-an-empty-tag behaviour (the actual NEF bug) are tested with synthesised
+JPEG/TIFF payloads and no exiftool. Capture-time parsing likewise builds its own
+JPEG, TIFF, RAF and MP4 fixtures (`buildJPEG`, `buildTIFF`, `buildRAF`,
+`buildMOV` in `capture_test.go`).
+
+Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also probes basename+size **anywhere** in the destination tree — an old backup, or a source-modtime change on a file with no capture metadata, must not duplicate the file under a second date directory — but only skips on that evidence once the capture times agree; see "Is this destination file the same photograph?" above.
 
 Source files whose modtime is within `scan.StableAge` (10 s) of the scan are treated as still being written and skipped with a warning (`scan.SplitStable`, applied in `runCopy`, `runDirect` and `status.Compute` → `StatusResult.CameraUnstable`); copying mid-write would produce a truncated destination. Far-future modtimes (wrong camera clock) are treated as stable.
 

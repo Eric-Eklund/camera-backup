@@ -119,7 +119,7 @@ func verifyCmd(cfg *config.Config, logger *log.Logger, p *tea.Program) tea.Cmd {
 	return func() tea.Msg {
 		bad := 0
 		total := 0
-		err := verify.RunWithCallback(cfg, logger, func(done, tot int, r verify.FileResult) {
+		skipped, err := verify.RunWithCallback(cfg, logger, func(done, tot int, r verify.FileResult) {
 			total = tot
 			if len(r.Issues) > 0 {
 				bad++
@@ -130,7 +130,7 @@ func verifyCmd(cfg *config.Config, logger *log.Logger, p *tea.Program) tea.Cmd {
 			logger.Printf("ERROR verify: %v", err)
 			return verifyDoneMsg{bad: -1, total: total}
 		}
-		return verifyDoneMsg{bad: bad, total: total}
+		return verifyDoneMsg{bad: bad, total: total, skipped: skipped}
 	}
 }
 

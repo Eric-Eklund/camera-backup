@@ -348,10 +348,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case msg.bad < 0:
 			m.doneMsg = "Verify failed to run — check the log."
-		case msg.bad == 0:
+		case msg.bad == 0 && len(msg.skipped) == 0:
 			m.doneMsg = fmt.Sprintf("All %d files verified OK.", msg.total)
+		case msg.bad == 0:
+			m.doneMsg = fmt.Sprintf("All %d files verified OK against what was checked.\nNot checked: %s",
+				msg.total, strings.Join(msg.skipped, ", "))
 		default:
 			m.doneMsg = fmt.Sprintf("%d / %d files have issues.", msg.bad, msg.total)
+			if len(msg.skipped) > 0 {
+				m.doneMsg += "\nNot checked: " + strings.Join(msg.skipped, ", ")
+			}
 		}
 
 	case thumbnailMsg:

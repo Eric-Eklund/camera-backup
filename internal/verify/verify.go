@@ -27,7 +27,7 @@ type ProgressFn func(done, total int, r FileResult)
 // If verbose is true every file is printed; otherwise only failures are shown.
 func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
 	bad, total := 0, 0
-	err := verifyAll(cfg, logger, os.Stdout, func(done, tot int, r FileResult) {
+	skipped, err := verifyAll(cfg, logger, os.Stdout, func(done, tot int, r FileResult) {
 		total = tot
 		ok := len(r.Issues) == 0
 		if !ok {
@@ -48,17 +48,29 @@ func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
 	}
 
 	fmt.Println()
-	if bad == 0 {
+	switch {
+	case bad == 0 && len(skipped) == 0:
 		ui.Green.Printf("  All %d files verified OK.\n\n", total)
-	} else {
-		ui.Yellow.Printf("  %d / %d files have issues.\n\n", bad, total)
+	case bad == 0:
+		// Never let an unchecked destination read as a clean bill of health.
+		ui.Green.Printf("  All %d files verified OK against the destinations that were checked.\n", total)
+		ui.Yellow.Printf("  ⚠️  Not checked: %s — mount and re-run to verify there.\n\n", strings.Join(skipped, ", "))
+	default:
+		ui.Yellow.Printf("  %d / %d files have issues.\n", bad, total)
+		if len(skipped) > 0 {
+			ui.Yellow.Printf("  ⚠️  Not checked: %s — mount and re-run to verify there.\n", strings.Join(skipped, ", "))
+		}
+		fmt.Println()
 	}
 	return nil
 }
 
 // RunWithCallback verifies all files without printing to stdout.
 // fn is called after each file completes; fn may be nil.
-func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) error {
+// The returned list names the configured destinations that were not mounted and
+// therefore not compared against — a pass that skipped one has not verified the
+// backup, so callers must not present it as a clean result.
+func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) ([]string, error) {
 	return verifyAll(cfg, logger, nil, fn)
 }
 
@@ -66,7 +78,12 @@ func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) erro
 // its SSD and NAS copies. When progressOut is non-nil, CLI headers and per-hash
 // progress bars are written to it; when nil the pass is silent.
 // fn (may be nil) receives each file's result as it completes.
-func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn ProgressFn) error {
+//
+// It returns the configured destinations it could not compare against. An
+// unmounted root is not an error — the other destinations are still worth
+// checking — but silence about it would let "all files verified OK" stand for a
+// destination nothing ever looked at.
+func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn ProgressFn) (skipped []string, err error) {
 	exts := cfg.NormalisedExtensions()
 
 	source := cfg.ActiveSource()
@@ -77,7 +94,16 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 	nasVideosAvail := config.RootAvailable(cfg.NASVideos)
 
 	if !sourceAvail && !ssdPhotosAvail && !ssdVideosAvail {
-		return fmt.Errorf("no verification authority available — mount the source device (%s) or an SSD root", source)
+		return nil, fmt.Errorf("no verification authority available — mount the source device (%s) or an SSD root", source)
+	}
+
+	skipped = unmountedRoots(cfg, map[string]bool{
+		"photos": ssdPhotosAvail, "videos": ssdVideosAvail,
+	}, map[string]bool{
+		"photos": nasPhotosAvail, "videos": nasVideosAvail,
+	})
+	if len(skipped) > 0 {
+		logger.Printf("VERIFY skipped unmounted destinations: %s", strings.Join(skipped, ", "))
 	}
 
 	// Destination indices, one per category root (shared when merged).
@@ -106,11 +132,10 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 	nasCatAvail := map[string]bool{"photos": nasPhotosAvail, "videos": nasVideosAvail}
 
 	var authorityFiles []scan.FileInfo
-	var err error
 	if sourceAvail {
 		authorityFiles, err = scan.WalkSource(source, exts)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else {
 		if progressOut != nil {
@@ -189,7 +214,36 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 			fn(i+1, total, res)
 		}
 	}
-	return nil
+	return skipped, nil
+}
+
+// unmountedRoots names the configured destination roots that are not currently
+// available, so a caller can say which parts of the backup went unchecked.
+// Merged roots are named once; an unconfigured device contributes nothing.
+func unmountedRoots(cfg *config.Config, ssdAvail, nasAvail map[string]bool) []string {
+	var out []string
+	add := func(name, root string, avail bool) {
+		if !avail {
+			out = append(out, fmt.Sprintf("%s (%s)", name, root))
+		}
+	}
+	if cfg.SSDInUse() {
+		if cfg.SSDMerged() {
+			add("SSD", cfg.SSDPhotos, ssdAvail["photos"])
+		} else {
+			add("SSD photos", cfg.SSDPhotos, ssdAvail["photos"])
+			add("SSD videos", cfg.SSDVideos, ssdAvail["videos"])
+		}
+	}
+	if cfg.NASConfigured() {
+		if cfg.NASMerged() {
+			add("NAS", cfg.NASPhotos, nasAvail["photos"])
+		} else {
+			add("NAS photos", cfg.NASPhotos, nasAvail["photos"])
+			add("NAS videos", cfg.NASVideos, nasAvail["videos"])
+		}
+	}
+	return out
 }
 
 // findCopy locates f's copy in one destination root. It looks under the date
@@ -197,12 +251,28 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 // started being read — anywhere in the tree by basename+size. This mirrors how
 // scan.MissingFromDest decides a file is already present, so verify never
 // reports "missing" for a file copy would skip.
+//
+// The basename+size match is confirmed against the capture time, exactly as the
+// copy path does it: three cards all number their first frame DSC_0001, and two
+// of those can share a byte-exact size. Without the check a different photograph
+// would be hashed and reported as a mismatch, when the truth is that this file
+// was never copied.
 func findCopy(byRelPath, byNameSize map[string]scan.FileInfo, f scan.FileInfo) (scan.FileInfo, bool) {
 	if e, ok := findBySize(byRelPath, f.DestKey(), f.Size); ok {
 		return e, true
 	}
 	e, ok := byNameSize[scan.NameSizeKey(f.RelPath, f.Size)]
-	return e, ok
+	if !ok {
+		return scan.FileInfo{}, false
+	}
+	if f.CaptureTime.IsZero() {
+		// Nothing to compare — basename+size is the only evidence there is.
+		return e, true
+	}
+	if t, got := scan.CaptureTime(e.AbsPath); got && !t.Equal(f.CaptureTime) {
+		return scan.FileInfo{}, false
+	}
+	return e, true
 }
 
 // findBySize returns the destination entry for key whose size matches size:
