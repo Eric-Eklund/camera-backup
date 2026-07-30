@@ -89,36 +89,31 @@ func logCollision(t Task, intendedPath, dstPath string, logger *log.Logger) {
 }
 
 // CopyAndVerify copies one task to dstRoot, syncs to disk, then SHA256-verifies src vs dst.
-// Used for Camera→SSD where the SSD is the source of truth.
+// Used wherever the destination is the only copy of the file: Camera→SSD, and
+// the direct source→NAS dump that bypasses the SSD.
 // Source is opened read-only. On failure the partial destination file is removed.
 // Modtime is preserved so downstream date-based comparisons remain correct.
-func CopyAndVerify(t Task, logger *log.Logger) error {
+// A writeTimeout > 0 bounds how long the write may take — pass it for NAS
+// destinations, where a hung mount would otherwise block forever, and 0 for
+// local disks; <= 0 disables it.
+func CopyAndVerify(t Task, logger *log.Logger, writeTimeout time.Duration) error {
 	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
 	src, dst, dstPath, pw, err := setup(t)
 	if err != nil {
 		return err
 	}
+	// On timeout the stalled goroutine may still be reading src; this deferred
+	// Close makes its next read fail so it winds down instead of copying on.
 	defer src.Close()
 
-	buf := make([]byte, copyBufSize)
-	if _, err := io.CopyBuffer(io.MultiWriter(dst, pw), src, buf); err != nil {
-		pw.Done()
-		dst.Close()
-		os.Remove(dstPath)
-		return fmt.Errorf("copying %q: %w", t.Src.RelPath, err)
-	}
+	err = copyStream(dst, src, pw, t.Src.RelPath, dstPath, true, writeTimeout, func() { os.Remove(dstPath) })
 	pw.Done()
-
-	if err := dst.Sync(); err != nil {
-		dst.Close()
-		os.Remove(dstPath)
-		return fmt.Errorf("sync %q: %w", dstPath, err)
+	if errors.Is(err, errWriteTimeout) {
+		return nasTimeoutError(writeTimeout, t.Src.RelPath, dstPath)
 	}
-	// Close errors surface deferred write failures (common on network mounts) —
-	// a copy is not OK until the file is safely closed.
-	if err := dst.Close(); err != nil {
+	if err != nil {
 		os.Remove(dstPath)
-		return fmt.Errorf("close %q: %w", dstPath, err)
+		return err
 	}
 
 	_ = os.Chtimes(dstPath, t.Src.ModTime, t.Src.ModTime)
@@ -150,13 +145,22 @@ func CopyAndVerify(t Task, logger *log.Logger) error {
 // configured timeout — the signature of a hung network mount.
 var errWriteTimeout = errors.New("destination write timed out")
 
-// copyStream streams src into dst (mirroring progress into pw) and closes dst.
+// destFile is the subset of *os.File that copyStream writes through. It is an
+// interface rather than *os.File so tests can substitute a writer that hangs
+// on demand, standing in for a dropped network mount.
+type destFile interface {
+	io.WriteCloser
+	Sync() error
+}
+
+// copyStream streams src into dst (mirroring progress into pw) and closes dst,
+// flushing to disk first when syncBeforeClose is set (the verified path).
 // A timeout <= 0 waits forever. If the transfer is still running when the
 // timeout elapses, copyStream returns errWriteTimeout immediately; the stalled
 // transfer is left running in the background and onAbandoned is called once it
 // finally returns, so the caller can clean up the destination without blocking
 // on the hung mount. On any other error dst is closed before returning.
-func copyStream(dst io.WriteCloser, src io.Reader, pw io.Writer, relPath, dstPath string, timeout time.Duration, onAbandoned func()) error {
+func copyStream(dst destFile, src io.Reader, pw io.Writer, relPath, dstPath string, syncBeforeClose bool, timeout time.Duration, onAbandoned func()) error {
 	// The progress sink is silenced on timeout: an abandoned transfer must not
 	// touch it after the batch has moved on (it may be a closed events channel
 	// or a progress line another file is now rendering to).
@@ -169,8 +173,15 @@ func copyStream(dst io.WriteCloser, src io.Reader, pw io.Writer, relPath, dstPat
 			done <- fmt.Errorf("copying %q: %w", relPath, err)
 			return
 		}
-		// This fast path skips Sync, so Close is the only place deferred write
-		// failures (common on NAS mounts) surface — never report OK past it.
+		if syncBeforeClose {
+			if err := dst.Sync(); err != nil {
+				dst.Close()
+				done <- fmt.Errorf("sync %q: %w", dstPath, err)
+				return
+			}
+		}
+		// Without Sync, Close is the only place deferred write failures (common
+		// on NAS mounts) surface — never report OK past it.
 		if err := dst.Close(); err != nil {
 			done <- fmt.Errorf("close %q: %w", dstPath, err)
 			return
@@ -233,7 +244,7 @@ func Copy(t Task, logger *log.Logger, writeTimeout time.Duration) error {
 	// Close makes its next read fail so it winds down instead of copying on.
 	defer src.Close()
 
-	err = copyStream(dst, src, pw, t.Src.RelPath, dstPath, writeTimeout, func() { os.Remove(dstPath) })
+	err = copyStream(dst, src, pw, t.Src.RelPath, dstPath, false, writeTimeout, func() { os.Remove(dstPath) })
 	pw.Done()
 	if errors.Is(err, errWriteTimeout) {
 		return nasTimeoutError(writeTimeout, t.Src.RelPath, dstPath)
@@ -318,10 +329,11 @@ func (g *sendGuard) closeCh(events chan<- FileProgress) {
 }
 
 // copyWithWriter copies a single task to its destination root, writing
-// progress bytes to w. If doVerify is true the destination is SHA256-checked
-// against the source. On failure the partial destination file is removed.
-// writeTimeout bounds the fast (non-verify, SSD→NAS) path only, mirroring
-// Copy; the verified path never times out.
+// progress bytes to w. If doVerify is true the destination is flushed to disk
+// and SHA256-checked against the source. On failure the partial destination
+// file is removed. writeTimeout bounds the write on either path, so a direct
+// (verified) dump to the NAS is protected from a hung mount too; pass 0 for
+// local destinations.
 func copyWithWriter(t Task, doVerify bool, logger *log.Logger, w io.Writer, writeTimeout time.Duration) error {
 	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
 	if err := os.MkdirAll(filepath.Dir(intendedPath), 0755); err != nil {
@@ -338,33 +350,12 @@ func copyWithWriter(t Task, doVerify bool, logger *log.Logger, w io.Writer, writ
 		return fmt.Errorf("create dest %q: %w", intendedPath, err)
 	}
 
-	if doVerify {
-		buf := make([]byte, copyBufSize)
-		if _, err := io.CopyBuffer(io.MultiWriter(dst, w), src, buf); err != nil {
-			dst.Close()
-			os.Remove(dstPath)
-			return fmt.Errorf("copying %q: %w", t.Src.RelPath, err)
-		}
-		if err := dst.Sync(); err != nil {
-			dst.Close()
-			os.Remove(dstPath)
-			return fmt.Errorf("sync %q: %w", dstPath, err)
-		}
-		// Close errors surface deferred write failures (common on network mounts) —
-		// a copy is not OK until the file is safely closed.
-		if err := dst.Close(); err != nil {
-			os.Remove(dstPath)
-			return fmt.Errorf("close %q: %w", dstPath, err)
-		}
-	} else {
-		err := copyStream(dst, src, w, t.Src.RelPath, dstPath, writeTimeout, func() { os.Remove(dstPath) })
+	if err := copyStream(dst, src, w, t.Src.RelPath, dstPath, doVerify, writeTimeout, func() { os.Remove(dstPath) }); err != nil {
 		if errors.Is(err, errWriteTimeout) {
 			return nasTimeoutError(writeTimeout, t.Src.RelPath, dstPath)
 		}
-		if err != nil {
-			os.Remove(dstPath)
-			return err
-		}
+		os.Remove(dstPath)
+		return err
 	}
 
 	if doVerify {
@@ -403,9 +394,8 @@ func copyWithWriter(t Task, doVerify bool, logger *log.Logger, w io.Writer, writ
 // Cancelling ctx stops gracefully: files already being copied run to
 // completion (so the destination never holds partial files), but queued
 // tasks are not started. Cancelled tasks are not counted as failures.
-// nasWriteTimeout bounds each fast (non-verify, SSD→NAS) copy so a hung mount
-// fails the file instead of pinning a worker forever; <= 0 disables it and it
-// never applies when doVerify is true.
+// nasWriteTimeout bounds each copy to a NAS root so a hung mount fails the
+// file instead of pinning a worker forever; pass 0 for local destinations.
 func RunBatchParallel(ctx context.Context, tasks []Task, logger *log.Logger, doVerify bool, nasWriteTimeout time.Duration, workers int, events chan<- FileProgress) int {
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
@@ -454,13 +444,13 @@ loop:
 // RunBatch copies a slice of tasks using CopyAndVerify if verify is true,
 // else the faster Copy. Errors are logged and counted; the batch continues on failure.
 // Returns the number of files that failed.
-// nasWriteTimeout bounds each fast (non-verify, SSD→NAS) copy so a hung mount
-// fails the file instead of the batch; it never applies to the verified
-// Camera→SSD path, and <= 0 disables it.
+// nasWriteTimeout bounds each copy to a NAS root so a hung mount fails the
+// file instead of the batch — including verified direct dumps; pass 0 for
+// local destinations such as Camera→SSD.
 func RunBatch(tasks []Task, logger *log.Logger, verify bool, nasWriteTimeout time.Duration) int {
 	copyFn := func(t Task, logger *log.Logger) error { return Copy(t, logger, nasWriteTimeout) }
 	if verify {
-		copyFn = CopyAndVerify
+		copyFn = func(t Task, logger *log.Logger) error { return CopyAndVerify(t, logger, nasWriteTimeout) }
 	}
 	errCount := 0
 	for i, t := range tasks {

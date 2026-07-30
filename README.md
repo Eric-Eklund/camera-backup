@@ -1,6 +1,6 @@
 # camera-backup
 
-A CLI tool for safely backing up camera media (Nikon Z6 III and similar) from memory cards to a local SSD and a remote NAS — incrementally and with SHA256 verification.
+A CLI tool for safely backing up camera media (Nikon Z6 III and similar) from memory cards to a local SSD and a remote NAS — incrementally and with SHA256 verification. Cards and external drives can also be dumped straight to the NAS, skipping the local SSD.
 
 Built in Go. Never deletes or overwrites source files.
 
@@ -21,6 +21,18 @@ Built in Go. Never deletes or overwrites source files.
 1. `camera-backup copy` — camera → SSD (verified) then SSD → NAS
 2. `camera-backup verify` — confirm everything matches
 
+### Straight to the NAS (no local SSD)
+
+Plug in a memory card or an external SSD and push it to the NAS without a local
+staging copy:
+
+1. `camera-backup dump` — source → NAS, SHA256-verified
+2. `camera-backup verify` — confirm everything matches
+
+Set `direct_to_nas = true` in `config.toml` to make this the default for
+`camera-backup copy` and for `[y]` in the TUI. See
+[Dumping straight to the NAS](#dumping-straight-to-the-nas).
+
 ---
 
 ## Safety guarantees
@@ -29,8 +41,10 @@ Built in Go. Never deletes or overwrites source files.
 - Source files are opened **read-only**
 - Destination files are **never overwritten** — if a filename already exists, the new file is saved with a `_1`, `_2`, … suffix and a warning is printed
 - Memory cards are always formatted manually in-camera
-- Copy order is always `Camera → SSD → NAS` (never camera → NAS directly)
-- `copy` checks available disk space before starting and aborts if there is not enough room
+- Copy order is `Camera → SSD → NAS` by default. `camera-backup dump` (or
+  `direct_to_nas = true`) copies the card straight to the NAS instead — those
+  copies are always SHA256-verified, because the NAS copy is then the only copy
+- `copy`, `dump` and `sync` check available disk space before starting and abort if there is not enough room
 
 ---
 
@@ -43,7 +57,7 @@ Quick check — compares by filename and file size. Shows how much data needs to
 ```
   Devices
   ────────────────────────────────────────────────────────
-  ✅  Camera      /media/eric/NIKON    (no free space info)
+  ✅  Source      /media/eric/NIKON    (no free space info)
   ✅  SSD photos  /mnt/ssd/Photos      210.4 GB free
   ✅  SSD videos  /mnt/ssd/Videos      210.4 GB free
   ✅  NAS photos  /mnt/nas/Photos       1.2 TB free
@@ -51,7 +65,7 @@ Quick check — compares by filename and file size. Shows how much data needs to
 
   Summary
   ────────────────────────────────────────────────────────
-  Camera files found :  47  (2.1 GB)
+  Source files found :  47  (2.1 GB)
   Missing from SSD   :  13  (620.4 MB to copy, 210.4 GB free)
   Missing from NAS   :  13  (620.4 MB to copy, 1.2 TB free)
 ```
@@ -94,6 +108,34 @@ Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verificati
 ```
 
 If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly after Phase 1. Run `camera-backup sync` later to push to NAS — files already there are skipped automatically.
+
+### `camera-backup dump`
+
+Copies files missing from the NAS straight from the source device, bypassing the
+local SSD. Use it when you plug in a card or an external drive and want the
+files on the NAS without a local staging copy.
+
+```
+camera-backup dump                    # all missing files, videos first
+camera-backup dump --videos-only     # only video files (-v)
+camera-backup dump --photos-only     # only photo files (-p)
+camera-backup dump --order=size-asc  # smallest files first, regardless of type
+```
+
+Files land in the same `year/month/day` layout as a staged backup, so a card
+dumped directly and a card copied via the SSD produce the same tree. Every file
+is **SHA256-verified** after copying: with no SSD in the chain the NAS copy is
+the only copy, so a failed run says plainly that the card is not safe to format.
+
+The source device is the first mounted path of `source` / `extra_sources`, so
+one config can serve a card reader and an external drive — see
+[Dumping straight to the NAS](#dumping-straight-to-the-nas).
+
+NAS writes are bounded by `nas_write_timeout_seconds` here too, so a hung mount
+fails that one file instead of the whole run.
+
+`dump` works whether or not `direct_to_nas` is set — the setting only decides
+what `copy` and the TUI do by default.
 
 ### `camera-backup sync`
 
@@ -147,9 +189,58 @@ copy/sync/verify with live parallel progress bars.
 - `?` opens a help screen with all keybindings, `v` runs verify, `q` quits
 - Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
-- Devices are watched — plugging in the SD card refreshes the view automatically
-- SSD→NAS copies honour `nas_write_timeout_seconds` (a hung mount fails the
+- `c` opens a **settings screen** that edits config.toml in place — see below
+- Devices are watched — plugging in the SD card (or any `extra_sources` device)
+  refreshes the view automatically
+- Copies to the NAS honour `nas_write_timeout_seconds` (a hung mount fails the
   file, not the batch) and `nas_sync_order` from config.toml
+- With `direct_to_nas = true` the SSD column and tab disappear, the device
+  header reads `Source → NAS`, and `y` dumps straight to the NAS (verified)
+
+#### Settings screen (`c`)
+
+Every config.toml key can be edited without leaving the TUI — paths, the
+`direct_to_nas` toggle, extension lists, worker counts, the write timeout and
+the transfer order:
+
+```
+╭─ Settings • ───────────────────────────────────────────────────────────╮
+│  ▶ Source device         /run/media/eric/NIKON              ✔ found    │
+│    Extra sources         /run/media/eric/EXT-SSD            1/1 mounted│
+│    Direct to NAS         [✔] on                                        │
+│    SSD photos            (not set)                          unset      │
+│    NAS photos            /mnt/nas/Photos                    ✔ found    │
+│    NAS transfer order    videos-first                                  │
+│                                                                        │
+│  direct_to_nas — bypass the local SSD — dump straight to the NAS       │
+│  Unsaved changes                                                       │
+╰────────────────────────────────────────────────────────────────────────╯
+ [j/k] move  [enter] edit/toggle  [s] save  [r] reload  [esc] back
+```
+
+- `j/k` moves, `enter` (or `space`) edits a path, flips a toggle, or cycles an
+  enum. While editing: `←/→`, `home`/`end`, `ctrl+u` to clear, `enter` to
+  accept, `esc` to cancel
+- **Paths are probed as you type** — `✔ found` / `✘ missing` updates on every
+  keystroke, so a typo in a mount point is obvious before you save. Destination
+  roots count as found when their parent exists, since the root itself is
+  created on the first copy
+- `s` saves. The edit is validated first (the same rules `config.Load` applies),
+  so an impossible combination — dropping the SSD roots without turning on
+  `direct_to_nas`, say — is reported and **nothing is written**
+- After a save the TUI adopts the new config immediately: devices are rescanned
+  against the new paths and the device watcher follows them. No restart
+- `r` reloads from disk, discarding edits. Leaving with unsaved changes takes a
+  second `esc` (the title shows `Settings •` while dirty)
+
+Saving is a **surgical rewrite** of config.toml: each key is updated on the line
+where it already sits, so your comments, ordering and any keys this tool does
+not manage survive untouched. Keys the file did not have are appended under an
+`# Added by the settings screen` heading. The write is atomic, so an interrupted
+save cannot leave a truncated config.
+
+Optional keys are written as their effective values — after the first save the
+file states explicitly what the tool is doing rather than relying on defaults.
 
 ---
 
@@ -159,8 +250,15 @@ Copy `config-template.toml` to `config.toml` next to the binary (or pass
 `--config <path>`) and adjust the paths. `config.toml` is gitignored, so your
 local paths stay out of version control.
 
+Everything below can also be edited from the TUI's settings screen (`c`) instead
+of by hand — see [Settings screen](#settings-screen-c).
+
 ```toml
 source     = "/media/eric/NIKON"      # Camera / memory card (mount point)
+extra_sources = ["/media/eric/EXT-SSD"] # More source devices, tried in order
+                                       # when `source` is not mounted (optional)
+direct_to_nas = false                 # true = dump source → NAS, skipping the
+                                       # local SSD (optional, default false)
 ssd_photos = "/mnt/ssd/Photos"        # SSD destination for photos
 ssd_videos = "/mnt/ssd/Videos"        # SSD destination for videos
 nas_photos = "/mnt/nas/Photos"        # NAS destinations (optional, set both or neither)
@@ -196,6 +294,43 @@ unavailable (e.g. the video disk isn't mounted), the other category is still
 copied and the skipped files are reported.
 
 Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all match.
+
+### Dumping straight to the NAS
+
+`direct_to_nas = true` takes the local SSD out of the copy path: plug in a
+memory card or an external SSD, and `camera-backup copy` — or `[y]` in the TUI —
+copies it straight to the NAS.
+
+```toml
+source        = "/run/media/eric/NIKON"        # the card reader
+extra_sources = ["/run/media/eric/EXT-SSD"]    # …or an external SSD
+nas_photos    = "/mnt/nas/Photos"
+nas_videos    = "/mnt/nas/Videos"
+direct_to_nas = true
+```
+
+- **Multiple source devices.** The source is the first path in
+  `source` + `extra_sources` that is actually mounted, so whichever device you
+  plug in becomes the source. Nothing else needs to change between a card and
+  an external drive.
+- **Always verified.** Direct copies are SHA256-verified, because the NAS copy
+  is the only copy. If a file fails, the run says so and tells you not to format
+  the card.
+- **Same layout.** Files land in the usual `year/month/day` tree under the NAS
+  category roots, so a direct dump and a staged backup are interchangeable.
+  Because the destination path comes from each file's modification time, an
+  external drive that already holds a `year/month/day` tree lands in the same
+  places on the NAS.
+- **The SSD keys become optional.** Leave `ssd_photos`/`ssd_videos` out
+  entirely, or keep them so `camera-backup sync` can still push an existing SSD
+  tree to the NAS. Either way, `copy` and the TUI bypass the SSD, and the SSD
+  is shown as *bypassed* in `status` rather than missing.
+- **Per-run instead of permanent.** Leave the setting off and run
+  `camera-backup dump` when you want a direct copy — the setting only changes
+  the default for `copy` and the TUI.
+
+Only `direct_to_nas` needs `nas_photos`/`nas_videos` to be set; without a NAS
+there is nowhere to dump to and the config is rejected at load time.
 
 ### Recommended NAS mount options
 
@@ -256,7 +391,9 @@ Files are organised by shoot date (taken from the file's modification time) in a
         DSC_0002.NEF
 ```
 
-Both SSD and NAS use the same structure. The date folder prevents filename collisions across sessions (Nikon resets to `DSC_0001` when a new card is formatted).
+Both SSD and NAS use the same structure, whether the files arrive via the SSD or
+straight from the card with `dump`. The date folder prevents filename collisions
+across sessions (Nikon resets to `DSC_0001` when a new card is formatted).
 
 ---
 
@@ -289,6 +426,18 @@ go run ./cmd/camera-backup --config testdata/config.toml status
 go run ./cmd/camera-backup --config testdata/config.toml copy
 go run ./cmd/camera-backup --config testdata/config.toml verify -v
 ```
+
+`testdata/config-direct.toml` exercises the direct source → NAS path
+(`direct_to_nas = true`, no `ssd_*` keys) against the same testdata:
+
+```bash
+go run ./cmd/camera-backup --config testdata/config-direct.toml status
+go run ./cmd/camera-backup --config testdata/config-direct.toml dump
+go run ./cmd/camera-backup --config testdata/config-direct.toml verify -v
+```
+
+It also lists `testdata/extdrive` in `extra_sources`; create that directory
+with a file in it to check that the source falls back to a second device.
 
 Reset:
 

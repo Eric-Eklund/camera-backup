@@ -205,6 +205,156 @@ nas_photos = "/nas/Photos"
 	}
 }
 
+// ── direct_to_nas ─────────────────────────────────────────────────────────────
+
+func TestLoad_DirectToNASWithoutSSD(t *testing.T) {
+	path := writeTempConfig(t, `
+source        = "/cam"
+nas_photos    = "/nas/Photos"
+nas_videos    = "/nas/Videos"
+direct_to_nas = true
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.DirectToNAS {
+		t.Error("DirectToNAS = false, want true")
+	}
+	if cfg.SSDConfigured() {
+		t.Error("SSDConfigured() = true with no SSD keys")
+	}
+	if cfg.SSDInUse() {
+		t.Error("SSDInUse() = true in direct mode")
+	}
+}
+
+// direct_to_nas takes the SSD out of the copy path even when its roots are
+// still configured, so `sync` keeps working.
+func TestLoad_DirectToNASKeepsSSDConfigured(t *testing.T) {
+	path := writeTempConfig(t, `
+source        = "/cam"
+ssd_photos    = "/ssd/Photos"
+ssd_videos    = "/ssd/Videos"
+nas_photos    = "/nas/Photos"
+nas_videos    = "/nas/Videos"
+direct_to_nas = true
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.SSDConfigured() {
+		t.Error("SSDConfigured() = false, want true")
+	}
+	if cfg.SSDInUse() {
+		t.Error("SSDInUse() = true in direct mode")
+	}
+}
+
+func TestLoad_DirectToNASRequiresNAS(t *testing.T) {
+	path := writeTempConfig(t, `
+source        = "/cam"
+direct_to_nas = true
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for direct_to_nas without a NAS")
+	}
+	if !strings.Contains(err.Error(), "nas_photos") {
+		t.Errorf("error should name the missing NAS keys, got: %v", err)
+	}
+}
+
+func TestLoad_DirectToNASRejectsLoneSSDKey(t *testing.T) {
+	path := writeTempConfig(t, `
+source        = "/cam"
+ssd_photos    = "/ssd/Photos"
+nas_photos    = "/nas/Photos"
+nas_videos    = "/nas/Videos"
+direct_to_nas = true
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("expected error when only one SSD key is set")
+	}
+}
+
+func TestLoad_MissingSSDSuggestsDirectMode(t *testing.T) {
+	path := writeTempConfig(t, `
+source = "/cam"
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error when no SSD roots are set")
+	}
+	if !strings.Contains(err.Error(), "direct_to_nas") {
+		t.Errorf("error should mention direct_to_nas, got: %v", err)
+	}
+}
+
+// ── source resolution ─────────────────────────────────────────────────────────
+
+func TestActiveSource_PrefersSourceWhenMounted(t *testing.T) {
+	card := t.TempDir()
+	drive := t.TempDir()
+	cfg := &config.Config{Source: card, ExtraSources: []string{drive}}
+	if got := cfg.ActiveSource(); got != card {
+		t.Errorf("ActiveSource() = %q, want %q", got, card)
+	}
+}
+
+func TestActiveSource_FallsBackToExtraSource(t *testing.T) {
+	drive := t.TempDir()
+	cfg := &config.Config{
+		Source:       filepath.Join(t.TempDir(), "not-mounted"),
+		ExtraSources: []string{filepath.Join(t.TempDir(), "also-absent"), drive},
+	}
+	if got := cfg.ActiveSource(); got != drive {
+		t.Errorf("ActiveSource() = %q, want %q", got, drive)
+	}
+}
+
+// With nothing mounted the configured source is returned so messages can name
+// a real path instead of an empty string.
+func TestActiveSource_NothingMounted(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-mounted")
+	cfg := &config.Config{Source: missing, ExtraSources: []string{filepath.Join(t.TempDir(), "gone")}}
+	if got := cfg.ActiveSource(); got != missing {
+		t.Errorf("ActiveSource() = %q, want %q", got, missing)
+	}
+}
+
+func TestSourceCandidates_SkipsEmpty(t *testing.T) {
+	cfg := &config.Config{Source: "/cam", ExtraSources: []string{"", "/drive"}}
+	got := cfg.SourceCandidates()
+	want := []string{"/cam", "/drive"}
+	if len(got) != len(want) {
+		t.Fatalf("SourceCandidates() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLoad_ExtraSources(t *testing.T) {
+	path := writeTempConfig(t, `
+source        = "/cam"
+extra_sources = ["/run/media/user/EXT-SSD"]
+nas_photos    = "/nas/Photos"
+nas_videos    = "/nas/Videos"
+direct_to_nas = true
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.ExtraSources) != 1 || cfg.ExtraSources[0] != "/run/media/user/EXT-SSD" {
+		t.Errorf("ExtraSources = %v", cfg.ExtraSources)
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")

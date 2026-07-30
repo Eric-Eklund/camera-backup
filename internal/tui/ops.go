@@ -179,9 +179,14 @@ func drainProgressCmd(events <-chan copyop.FileProgress, result <-chan int, p *t
 
 // watchDevicesCmd starts an fsnotify watcher on the parent directories of the configured
 // device paths. When a CREATE or REMOVE event is detected it sends a DeviceChangedMsg.
-func watchDevicesCmd(cfg *config.Config, p *tea.Program) tea.Cmd {
+// The watcher runs until stop is closed, which is how a config change swaps it
+// for one watching the new paths.
+func watchDevicesCmd(cfg *config.Config, p *tea.Program, stop <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
-		dirs := uniqueDirs(cfg.Source, cfg.SSDPhotos, cfg.SSDVideos, cfg.NASPhotos, cfg.NASVideos)
+		// Every source candidate is watched, so swapping a card for an external
+		// drive triggers a rescan whichever one the user plugs in.
+		watched := append(cfg.SourceCandidates(), cfg.SSDPhotos, cfg.SSDVideos, cfg.NASPhotos, cfg.NASVideos)
+		dirs := uniqueDirs(watched...)
 		if len(dirs) == 0 {
 			return nil
 		}
@@ -196,6 +201,8 @@ func watchDevicesCmd(cfg *config.Config, p *tea.Program) tea.Cmd {
 			defer watcher.Close()
 			for {
 				select {
+				case <-stop:
+					return
 				case ev, ok := <-watcher.Events:
 					if !ok {
 						return
@@ -245,6 +252,27 @@ func buildPhase1Tasks(missing []scan.FileInfo, cfg *config.Config, r *status.Sta
 			DstRelPath: f.DestRelPath(),
 		})
 	}
+	return tasks, skipped
+}
+
+// buildDirectTasks builds source→NAS copy tasks for a direct dump: the same
+// date-based destination paths a Camera→SSD copy would produce, written
+// straight to the NAS category roots. Files routed to an unavailable NAS root
+// are counted as skipped.
+func buildDirectTasks(missing []scan.FileInfo, cfg *config.Config, r *status.StatusResult) (tasks []copyop.Task, skipped int) {
+	for _, f := range missing {
+		cat := cfg.Category(f.RelPath)
+		if !r.NASRootAvail(cat) {
+			skipped++
+			continue
+		}
+		tasks = append(tasks, copyop.Task{
+			Src:        f,
+			DstRoot:    cfg.NASRoot(cat),
+			DstRelPath: f.DestRelPath(),
+		})
+	}
+	orderTasks(tasks, cfg)
 	return tasks, skipped
 }
 

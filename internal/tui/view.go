@@ -106,21 +106,27 @@ func (m *Model) renderHeaderRow() string {
 	return tabs + strings.Repeat(" ", gap) + dev
 }
 
-// renderDeviceHeader renders the compact device status: ✔ Camera · ✔ SSD 412 GB · ✘ NAS.
+// renderDeviceHeader renders the compact device status: ✔ Source · ✔ SSD 412 GB · ✘ NAS.
 // Devices with split photo/video roots get a partial marker (⚠ SSD ✔P ✘V)
-// when only one root is mounted.
+// when only one root is mounted. In direct mode the SSD is left out — it takes
+// no part in the copy — and the arrow spells out where files are going.
 func (m *Model) renderDeviceHeader() string {
 	if m.status == nil {
 		return ""
 	}
 	r := m.status
-	sep := styleDim.Render(" · ")
-	out := deviceBadge("Camera", r.SourceAvail, r.SourceFree) + sep +
-		dualBadge("SSD", r.SSDPhotosAvail, r.SSDVideosAvail, r.SSDPhotosFree, r.SSDVideosFree)
-	if m.cfg.NASConfigured() {
-		out += sep + dualBadge("NAS", r.NASPhotosAvail, r.NASVideosAvail, r.NASPhotosFree, r.NASVideosFree)
+	parts := []string{deviceBadge("Source", r.SourceAvail, r.SourceFree)}
+	if m.cfg.SSDInUse() {
+		parts = append(parts, dualBadge("SSD", r.SSDPhotosAvail, r.SSDVideosAvail, r.SSDPhotosFree, r.SSDVideosFree))
 	}
-	return out + " "
+	if m.cfg.NASConfigured() {
+		parts = append(parts, dualBadge("NAS", r.NASPhotosAvail, r.NASVideosAvail, r.NASPhotosFree, r.NASVideosFree))
+	}
+	joiner := styleDim.Render(" · ")
+	if m.cfg.DirectToNAS {
+		joiner = styleDim.Render(" → ")
+	}
+	return strings.Join(parts, joiner) + " "
 }
 
 func deviceBadge(name string, avail bool, free int64) string {
@@ -171,7 +177,12 @@ func minFree(a, b int64) int64 {
 }
 
 func (m *Model) renderStatusBar() string {
-	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [g] grid  [y] copy  [v] verify  [?] help  [q] quit"
+	copyHint := "[y] copy"
+	if m.cfg.DirectToNAS {
+		copyHint = "[y] dump → NAS"
+	}
+	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [g] grid  " +
+		copyHint + "  [v] verify  [c] settings  [?] help  [q] quit"
 	if n := len(m.selected); n > 0 {
 		var selBytes int64
 		for _, f := range m.allFiles {
@@ -275,9 +286,13 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 		}
 		f := files[node.fileIdx]
 		onSSD, onNAS := m.fileStatus(f)
-		ssdIcon := styleErr.Render("✗SSD")
-		if onSSD {
-			ssdIcon = styleOK.Render("✓SSD")
+		// The SSD marker is dropped in direct mode — the copy never touches it.
+		ssdIcon := ""
+		if m.cfg.SSDInUse() {
+			ssdIcon = styleErr.Render("✗SSD")
+			if onSSD {
+				ssdIcon = styleOK.Render("✓SSD")
+			}
 		}
 		nasIcon := ""
 		if m.status != nil && m.status.NASAvail() {
@@ -294,6 +309,9 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 		// Shrink the name column on narrow panels so the size and the
 		// SSD/NAS status icons always stay visible.
 		nameW := w - 28
+		if ssdIcon == "" {
+			nameW = w - 24 // no ✓SSD column to leave room for
+		}
 		if nameW > 22 {
 			nameW = 22
 		}
@@ -562,6 +580,8 @@ func (m *Model) renderProgress() string {
 		title = "Phase 2: SSD → NAS"
 	case modeSync:
 		title = "Sync: SSD → NAS"
+	case modeDirect:
+		title = "Direct: Source → NAS (with verification)"
 	case modeVerify:
 		title = "Verifying files…"
 	}
@@ -668,12 +688,117 @@ func (m *Model) renderVerifyProgress() string {
 	return sb.String()
 }
 
+// renderSettings renders the settings screen: one row per config key, with a
+// live ✔/✘ for every path so a mistyped mount point is obvious immediately.
+func (m *Model) renderSettings() string {
+	f := m.settings
+	if f == nil {
+		return m.screenFrame("Settings", "\n  Settings unavailable.", "[esc] back")
+	}
+
+	labelW := 20
+	markerW := 12
+	// Value column: whatever is left inside the frame after the label, marker
+	// and the padding between them.
+	valueW := m.width - labelW - markerW - 8
+	if valueW < 12 {
+		valueW = 12
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	for i, fl := range f.fields {
+		focused := i == f.cursor
+		editing := focused && f.editing
+
+		cursorMark := "  "
+		if focused {
+			cursorMark = styleWarn.Render("▶ ")
+		}
+
+		label := fmt.Sprintf("%-*s", labelW, truncate(fl.label, labelW))
+		if focused {
+			label = styleFieldLabelFocus.Render(label)
+		} else {
+			label = styleFieldLabel.Render(label)
+		}
+
+		// Probe the text being typed, not the last accepted value, so the ✔/✘
+		// tracks the keystrokes.
+		liveValue := fl.value
+		if editing {
+			liveValue = f.editor.String()
+		}
+
+		var value string
+		switch {
+		case editing:
+			value = f.editor.render(valueW)
+		case fl.kind == fieldBool:
+			value = renderToggle(fl.value)
+		case fl.value == "":
+			value = styleDim.Render("(not set)")
+		default:
+			value = styleFieldValue.Render(ansi.Truncate(fl.value, valueW, "…"))
+		}
+		pad := valueW - lipgloss.Width(value)
+		if pad < 1 {
+			pad = 1
+		}
+
+		sb.WriteString("  " + cursorMark + label + "  " + value + strings.Repeat(" ", pad) + fl.markerFor(liveValue) + "\n")
+	}
+
+	// Footer: the focused key's TOML name and hint, then status.
+	focused := f.fields[f.cursor]
+	sb.WriteString("\n  " + styleDim.Render(focused.key))
+	if focused.hint != "" {
+		sb.WriteString(styleDim.Render(" — " + focused.hint))
+	}
+	sb.WriteString("\n")
+
+	switch {
+	case f.err != "":
+		sb.WriteString("\n  " + styleErr.Render("✘ "+f.err) + "\n")
+	case f.notice != "":
+		sb.WriteString("\n  " + styleOK.Render("✔ "+f.notice) + "\n")
+	case f.confirmExit:
+		sb.WriteString("\n  " + styleWarn.Render("Unsaved changes — [s] save, or [esc] again to discard") + "\n")
+	case f.dirty:
+		sb.WriteString("\n  " + styleWarn.Render("Unsaved changes") + "\n")
+	default:
+		sb.WriteString("\n  " + styleDim.Render(f.configPath) + "\n")
+	}
+
+	title := "Settings"
+	if f.dirty {
+		title = "Settings •"
+	}
+	hint := "[j/k] move  [enter] edit/toggle  [s] save  [r] reload  [esc] back"
+	if f.editing {
+		hint = "[enter] accept  [esc] cancel  [ctrl+u] clear  [←→] move  typing edits the value"
+	}
+	return m.screenFrame(title, sb.String(), hint)
+}
+
+// renderToggle draws a boolean as a checkbox so its state reads at a glance.
+func renderToggle(value string) string {
+	if value == boolOn {
+		return styleOK.Render("[✔] on")
+	}
+	return styleDim.Render("[ ] off")
+}
+
 // renderHelp renders the keybinding reference screen.
 func (m *Model) renderHelp() string {
 	type binding struct{ keys, desc string }
 	type section struct {
 		title    string
 		bindings []binding
+	}
+	copyDesc := "copy — selected files, or everything missing"
+	if m.cfg.DirectToNAS {
+		copyDesc = "dump straight to the NAS (verified, local SSD bypassed)"
 	}
 	sections := []section{
 		{"Navigation", []binding{
@@ -687,8 +812,15 @@ func (m *Model) renderHelp() string {
 			{"a", "select/deselect everything in the tab"},
 		}},
 		{"Actions", []binding{
-			{"y", "copy — selected files, or everything missing"},
+			{"y", copyDesc},
 			{"v", "verify checksums (camera vs SSD vs NAS)"},
+			{"c", "settings — edit paths and options, saved to config.toml"},
+		}},
+		{"Settings screen", []binding{
+			{"enter / space", "edit a value · toggle · cycle choices"},
+			{"s · r", "save to config.toml · reload from it"},
+			{"ctrl+u", "clear the field while editing"},
+			{"esc", "cancel the edit, or leave the screen"},
 		}},
 		{"Grid & preview", []binding{
 			{"←→↑↓ / hjkl", "navigate thumbnails"},

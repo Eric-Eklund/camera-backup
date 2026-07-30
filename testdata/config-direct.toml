@@ -1,0 +1,12 @@
+# Direct Source → NAS testdata config — the local SSD is bypassed entirely,
+# so ssd_photos/ssd_videos are omitted. extra_sources points at a directory
+# that make_testdata.go does not create: create testdata/extdrive by hand to
+# exercise the fallback to a second source device.
+source        = "testdata/camera"
+extra_sources = ["testdata/extdrive"]
+nas_photos    = "testdata/nas/photos"
+nas_videos    = "testdata/nas/videos"
+direct_to_nas = true
+
+file_extensions  = [".MOV", ".NEF", ".JPG", ".MP4"]
+video_extensions = [".MOV", ".MP4"]

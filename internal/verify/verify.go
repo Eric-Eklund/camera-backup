@@ -69,14 +69,15 @@ func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) erro
 func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn ProgressFn) error {
 	exts := cfg.NormalisedExtensions()
 
-	sourceAvail := isDir(cfg.Source)
+	source := cfg.ActiveSource()
+	sourceAvail := isDir(source)
 	ssdPhotosAvail := config.RootAvailable(cfg.SSDPhotos)
 	ssdVideosAvail := config.RootAvailable(cfg.SSDVideos)
 	nasPhotosAvail := config.RootAvailable(cfg.NASPhotos)
 	nasVideosAvail := config.RootAvailable(cfg.NASVideos)
 
 	if !sourceAvail && !ssdPhotosAvail && !ssdVideosAvail {
-		return fmt.Errorf("neither camera nor SSD is available — nothing to verify")
+		return fmt.Errorf("no verification authority available — mount the source device (%s) or an SSD root", source)
 	}
 
 	// Destination indices, one per category root (shared when merged).
@@ -96,13 +97,13 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 	var authorityFiles []scan.FileInfo
 	var err error
 	if sourceAvail {
-		authorityFiles, err = scan.Walk(cfg.Source, exts)
+		authorityFiles, err = scan.Walk(source, exts)
 		if err != nil {
 			return err
 		}
 	} else {
 		if progressOut != nil {
-			ui.Yellow.Fprintln(progressOut, "  Camera not available — verifying SSD vs NAS only.")
+			ui.Yellow.Fprintln(progressOut, "  Source device not available — verifying SSD vs NAS only.")
 		}
 		if cfg.SSDMerged() {
 			authorityFiles = ssdPhotoFiles
