@@ -197,12 +197,28 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 // started being read — anywhere in the tree by basename+size. This mirrors how
 // scan.MissingFromDest decides a file is already present, so verify never
 // reports "missing" for a file copy would skip.
+//
+// The basename+size match is confirmed against the capture time, exactly as the
+// copy path does it: three cards all number their first frame DSC_0001, and two
+// of those can share a byte-exact size. Without the check a different photograph
+// would be hashed and reported as a mismatch, when the truth is that this file
+// was never copied.
 func findCopy(byRelPath, byNameSize map[string]scan.FileInfo, f scan.FileInfo) (scan.FileInfo, bool) {
 	if e, ok := findBySize(byRelPath, f.DestKey(), f.Size); ok {
 		return e, true
 	}
 	e, ok := byNameSize[scan.NameSizeKey(f.RelPath, f.Size)]
-	return e, ok
+	if !ok {
+		return scan.FileInfo{}, false
+	}
+	if f.CaptureTime.IsZero() {
+		// Nothing to compare — basename+size is the only evidence there is.
+		return e, true
+	}
+	if t, got := scan.CaptureTime(e.AbsPath); got && !t.Equal(f.CaptureTime) {
+		return scan.FileInfo{}, false
+	}
+	return e, true
 }
 
 // findBySize returns the destination entry for key whose size matches size:

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -184,15 +185,30 @@ func IndexByKey(files []FileInfo) map[string]FileInfo {
 // mismatches by size, so the _N variants are probed too — otherwise the same
 // file would be copied again on every run, creating _2, _3, … forever.
 //
-// A source whose modtime changed after it was copied (e.g. a file manager
-// writing to the card and restoring the timestamp afterwards) computes a
-// different date path. To avoid duplicating it under the new date, a file
-// whose basename and size already exist anywhere in the destination tree is
-// also skipped.
+// A source filed under a date the destination does not have is looked up a
+// second time by basename+size across the whole tree, so a copy that sits
+// somewhere else is not duplicated: backups made before capture times were read
+// sit under their modtime's date, and a file with no capture metadata still
+// moves date when something rewrites its modtime.
+//
+// Basename+size alone is a weak identity — three cards all number their first
+// frame DSC_0001, and two of those can share a byte-exact size. Such a match is
+// therefore confirmed against the capture time of the destination file before
+// the source is skipped; a different capture time means a different photograph
+// and the source is copied (landing as a _N variant). Files with no capture
+// time on either side fall back to trusting basename+size, as before.
 func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
 	byNameSize := IndexByNameSize(dstIndex)
+
+	// Pass 1: decide everything that needs no metadata, and note the sources
+	// whose only evidence is a basename+size twin under another date.
+	type candidate struct {
+		srcIdx int
+		twin   FileInfo
+	}
 	var out []FileInfo
-	for _, f := range src {
+	var candidates []candidate
+	for i, f := range src {
 		key := f.DestKey()
 		existing, found := dstIndex[key]
 		if found && existing.Size == f.Size {
@@ -201,12 +217,54 @@ func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
 		if found && collisionCopyExists(key, f.Size, dstIndex) {
 			continue
 		}
-		if _, ok := byNameSize[NameSizeKey(f.RelPath, f.Size)]; ok {
+		twin, ok := byNameSize[NameSizeKey(f.RelPath, f.Size)]
+		if !ok {
+			out = append(out, f)
 			continue
 		}
-		out = append(out, f)
+		if f.CaptureTime.IsZero() {
+			// No capture time to compare — basename+size is all there is.
+			continue
+		}
+		candidates = append(candidates, candidate{srcIdx: i, twin: twin})
 	}
+	if len(candidates) == 0 {
+		return out
+	}
+
+	// Pass 2: read the twins' capture times concurrently. Only the ambiguous
+	// files are read, so a destination whose layout already matches costs
+	// nothing here.
+	paths := make([]string, len(candidates))
+	for i, c := range candidates {
+		paths[i] = c.twin.AbsPath
+	}
+	times := captureTimesOf(paths)
+
+	// Re-merge in source order so the returned batch keeps its input ordering.
+	var confirmed []FileInfo
+	for i, c := range candidates {
+		if t, ok := times[i]; ok && !t.Equal(src[c.srcIdx].CaptureTime) {
+			confirmed = append(confirmed, src[c.srcIdx])
+		}
+	}
+	if len(confirmed) == 0 {
+		return out
+	}
+	out = append(out, confirmed...)
+	sortBySrcOrder(out, src)
 	return out
+}
+
+// sortBySrcOrder restores src's ordering in out, which the two-pass split above
+// breaks. Callers rely on the batch order (videos first, size-asc) being applied
+// to a list that still reflects the scan.
+func sortBySrcOrder(out []FileInfo, src []FileInfo) {
+	pos := make(map[string]int, len(src))
+	for i, f := range src {
+		pos[f.AbsPath] = i
+	}
+	sort.SliceStable(out, func(i, j int) bool { return pos[out[i].AbsPath] < pos[out[j].AbsPath] })
 }
 
 // NameSizeKey identifies a file by lowercased basename and size, independent

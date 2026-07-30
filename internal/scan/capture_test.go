@@ -207,7 +207,7 @@ func TestFillCaptureTimes(t *testing.T) {
 
 // buildTIFF writes a little TIFF whose IFD0 points at an Exif sub-IFD holding
 // DateTimeOriginal — the same shape as the head of a NEF or CR2.
-func buildTIFF(t *testing.T, date string, bo binary.ByteOrder) []byte {
+func buildTIFF(t testing.TB, date string, bo binary.ByteOrder) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	if bo == binary.BigEndian {
@@ -253,7 +253,7 @@ func buildTIFF(t *testing.T, date string, bo binary.ByteOrder) []byte {
 
 // buildJPEG wraps a TIFF block in an APP1/Exif segment, optionally behind an
 // APP0/JFIF segment so the marker walk has something to skip.
-func buildJPEG(t *testing.T, date string, leadingAPP0 bool) []byte {
+func buildJPEG(t testing.TB, date string, leadingAPP0 bool) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	buf.Write([]byte{0xFF, 0xD8}) // SOI
@@ -295,4 +295,122 @@ func buildMOV(created time.Time) []byte {
 	out = append(out, atom("mdat", bytes.Repeat([]byte{0x11}, 64))...)
 	out = append(out, atom("moov", atom("mvhd", mvhd))...)
 	return out
+}
+
+// ── basename+size matches confirmed against the capture time ─────────────────
+
+// destFile builds a destination FileInfo backed by a real file carrying date,
+// so MissingFromDest can read its capture time.
+func destFile(t testing.TB, dir, relPath, date string, size int) FileInfo {
+	t.Helper()
+	abs := filepath.Join(dir, relPath)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := buildJPEG(t, date, false)
+	if size > len(data) {
+		data = append(data, make([]byte, size-len(data))...)
+	}
+	if err := os.WriteFile(abs, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return FileInfo{RelPath: filepath.ToSlash(relPath), AbsPath: abs, Size: int64(len(data))}
+}
+
+// TestMissingFromDest_DifferentShotSameNameSize is the case three SD cards
+// create: every card numbers its first frame DSC_0001, and two of those can
+// share a byte-exact size. The destination copy is a *different* photograph, so
+// the source must still be copied — basename+size alone would have skipped it.
+func TestMissingFromDest_DifferentShotSameNameSize(t *testing.T) {
+	dir := t.TempDir()
+	// Already backed up: shot on 2026-05-10.
+	dst := destFile(t, dir, "2026/2026-05/2026-05-10/DSC_0001.JPG", "2026:05:10 14:31:00", 4096)
+
+	// On the card: same name, same size, shot on a different day.
+	src := []FileInfo{{
+		RelPath: "DCIM/DSC_0001.JPG", AbsPath: filepath.Join(dir, "card/DSC_0001.JPG"),
+		Size:        dst.Size,
+		ModTime:     time.Date(2026, 6, 21, 9, 16, 0, 0, time.Local),
+		CaptureTime: time.Date(2026, 6, 21, 9, 16, 0, 0, time.Local),
+	}}
+
+	missing := MissingFromDest(src, IndexByRelPath([]FileInfo{dst}))
+	if len(missing) != 1 {
+		t.Fatalf("missing = %d files, want 1 — a different shot must not be skipped", len(missing))
+	}
+}
+
+// TestMissingFromDest_SameShotUnderOldDate is the migration case: the copy is
+// the same photograph, just filed under the modtime's date by an older version.
+// Confirming the capture time must recognise it and skip the source.
+func TestMissingFromDest_SameShotUnderOldDate(t *testing.T) {
+	dir := t.TempDir()
+	const shot = "2026:06:21 09:16:00"
+	dst := destFile(t, dir, "2026/2026-07/2026-07-28/DSC_0001.JPG", shot, 4096)
+
+	src := []FileInfo{{
+		RelPath: "DCIM/DSC_0001.JPG", AbsPath: dst.AbsPath, Size: dst.Size,
+		ModTime:     time.Date(2026, 7, 28, 20, 0, 0, 0, time.Local),
+		CaptureTime: time.Date(2026, 6, 21, 9, 16, 0, 0, time.Local),
+	}}
+
+	if missing := MissingFromDest(src, IndexByRelPath([]FileInfo{dst})); len(missing) != 0 {
+		t.Errorf("missing = %v, want none — same shot, only filed under another date", missing)
+	}
+}
+
+// TestMissingFromDest_NoCaptureTimeTrustsNameSize keeps the old behaviour for
+// files with no metadata to compare: their date path is derived from the
+// modtime, so a basename+size match anywhere is the best evidence available.
+func TestMissingFromDest_NoCaptureTimeTrustsNameSize(t *testing.T) {
+	dir := t.TempDir()
+	dst := destFile(t, dir, "2026/2026-07/2026-07-28/CLIP.MOV", "2026:06:21 09:16:00", 4096)
+
+	src := []FileInfo{{
+		RelPath: "DCIM/CLIP.MOV", AbsPath: filepath.Join(dir, "card/CLIP.MOV"),
+		Size: dst.Size, ModTime: time.Date(2026, 6, 21, 9, 16, 0, 0, time.Local),
+		// CaptureTime deliberately zero.
+	}}
+
+	if missing := MissingFromDest(src, IndexByRelPath([]FileInfo{dst})); len(missing) != 0 {
+		t.Errorf("missing = %v, want none — no capture time, so basename+size decides", missing)
+	}
+}
+
+// TestMissingFromDest_PreservesSourceOrder guards the two-pass split: the batch
+// order the callers apply (videos first, size-asc) assumes the returned list
+// still reflects the scan order.
+func TestMissingFromDest_PreservesSourceOrder(t *testing.T) {
+	dir := t.TempDir()
+	// One destination copy that will need a capture-time confirmation, sitting
+	// between two sources that are plainly missing.
+	dst := destFile(t, dir, "2026/2026-07/2026-07-28/DSC_0002.JPG", "2026:01:01 00:00:00", 4096)
+
+	mk := func(name string, size int64, capture time.Time) FileInfo {
+		return FileInfo{
+			RelPath: "DCIM/" + name, AbsPath: filepath.Join(dir, "card", name),
+			Size: size, ModTime: capture, CaptureTime: capture,
+		}
+	}
+	shot := time.Date(2026, 6, 21, 9, 0, 0, 0, time.Local)
+	src := []FileInfo{
+		mk("DSC_0001.JPG", 1111, shot),
+		mk("DSC_0002.JPG", dst.Size, shot), // basename+size twin, different shot
+		mk("DSC_0003.JPG", 3333, shot),
+	}
+
+	missing := MissingFromDest(src, IndexByRelPath([]FileInfo{dst}))
+	var got []string
+	for _, f := range missing {
+		got = append(got, filepath.Base(f.RelPath))
+	}
+	want := []string{"DSC_0001.JPG", "DSC_0002.JPG", "DSC_0003.JPG"}
+	if len(got) != len(want) {
+		t.Fatalf("missing = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("missing = %v, want %v (source order)", got, want)
+		}
+	}
 }

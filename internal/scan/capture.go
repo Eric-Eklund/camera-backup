@@ -385,6 +385,61 @@ func FillCaptureTimes(files []FileInfo) {
 	wg.Wait()
 }
 
+// captureTimesOf reads the capture time of each path, returning the ones that
+// have a usable timestamp keyed by their index in paths. Duplicate paths are
+// read once. Used to confirm a basename+size match against real metadata, which
+// is why it is worth the bounded concurrency: these reads may be over a NAS
+// share where latency, not bandwidth, is the cost.
+func captureTimesOf(paths []string) map[int]time.Time {
+	unique := make(map[string][]int, len(paths))
+	for i, p := range paths {
+		unique[p] = append(unique[p], i)
+	}
+
+	type result struct {
+		path string
+		t    time.Time
+	}
+	jobs := make(chan string)
+	results := make(chan result)
+
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers < 1 || len(unique) < 2 {
+		workers = 1
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range jobs {
+				if t, ok := CaptureTime(p); ok {
+					results <- result{path: p, t: t}
+				}
+			}
+		}()
+	}
+	go func() {
+		for p := range unique {
+			jobs <- p
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	out := make(map[int]time.Time, len(paths))
+	for r := range results {
+		for _, i := range unique[r.path] {
+			out[i] = r.t
+		}
+	}
+	return out
+}
+
 // WalkSource scans a source device like Walk and additionally reads each file's
 // capture time, so DestRelPath files a shot under the date it was taken rather
 // than the date the file happened to be written.

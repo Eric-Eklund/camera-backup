@@ -52,7 +52,14 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
 
 ### `camera-backup status`
 
-Quick check — compares by filename and file size. Shows how much data needs to be copied and whether there is enough free space on each destination.
+Quick check — compares by shoot date, filename and file size rather than hashing. Shows how much data needs to be copied and whether there is enough free space on each destination.
+
+A file already sitting under its own shoot date with a matching size counts as
+backed up. When a copy turns up under a *different* date — an older backup, or a
+file with no capture metadata whose timestamp was rewritten — the match is
+confirmed against the capture time before the source is skipped, so two cards
+that both number a frame `DSC_0001` are never confused with each other. Use
+`camera-backup verify` when you want the full SHA256 comparison.
 
 ```
   Devices
