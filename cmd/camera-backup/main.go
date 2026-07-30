@@ -300,7 +300,7 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 		return fmt.Errorf("SSD not accessible at %s or %s", cfg.SSDPhotos, cfg.SSDVideos)
 	} else {
 		phase1Ran = true
-		cameraFiles, err := scan.Walk(source, exts)
+		cameraFiles, err := scan.WalkSource(source, exts)
 		if err != nil {
 			return err
 		}
@@ -399,7 +399,7 @@ func runDirect(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 			cfg.NASPhotos, cfg.NASVideos)
 	}
 
-	srcFiles, err := scan.Walk(source, exts)
+	srcFiles, err := scan.WalkSource(source, exts)
 	if err != nil {
 		return err
 	}

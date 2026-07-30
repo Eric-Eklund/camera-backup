@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"log"
@@ -100,18 +101,21 @@ type Model struct {
 	selected   map[string]bool // absPath → selected; empty = operate on all
 
 	// detail / preview
-	thumbCache   map[string]image.Image // absPath → decoded image (nil = unsupported)
+	thumbCache   map[string]image.Image // absPath → decoded image (nil = no preview)
 	loadingThumb map[string]bool        // absPath → thumbnail load in flight
-	fullCache    map[string]image.Image // absPath → full-size preview (nil = unsupported)
+	fullCache    map[string]image.Image // absPath → full-size preview (nil = no preview)
 	loadingFull  map[string]bool        // absPath → full image load in flight
-	kitty        bool                   // terminal supports Kitty Graphics Protocol
-	prevScreen   Screen
-	helpReturn   Screen // screen to return to when help closes
-	gridYear     string
-	gridMonth    string
-	gridDay      string
-	gridCursor   int
-	gridOffset   int // first visible thumbnail row (scroll position)
+	// rawToolMissing is set once a RAW preview fails because exiftool is not
+	// installed, so the panels can say why instead of showing a blank box.
+	rawToolMissing bool
+	kitty          bool // terminal supports Kitty Graphics Protocol
+	prevScreen     Screen
+	helpReturn     Screen // screen to return to when help closes
+	gridYear       string
+	gridMonth      string
+	gridDay        string
+	gridCursor     int
+	gridOffset     int // first visible thumbnail row (scroll position)
 
 	// copy/verify progress
 	progressMode  progressMode
@@ -351,16 +355,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case thumbnailMsg:
-		if msg.err == nil && msg.img != nil {
-			m.thumbCache[msg.file] = msg.img
-		} else if msg.err == nil {
-			m.thumbCache[msg.file] = nil // unsupported type; don't retry
+		// Cache the failure as well as the success: without an entry the view
+		// would ask for this thumbnail again on every render.
+		m.thumbCache[msg.file] = msg.img
+		if errors.Is(msg.err, preview.ErrNoRAWTool) {
+			m.rawToolMissing = true
 		}
 		delete(m.loadingThumb, msg.file)
 
 	case fullImageMsg:
-		if msg.err == nil {
-			m.fullCache[msg.file] = msg.img // may be nil = unsupported
+		m.fullCache[msg.file] = msg.img // nil = no preview available
+		if errors.Is(msg.err, preview.ErrNoRAWTool) {
+			m.rawToolMissing = true
 		}
 		delete(m.loadingFull, msg.file)
 		// If this is the file currently on the preview screen, draw it.
@@ -1022,9 +1028,12 @@ func (m *Model) buildTree() {
 	m.dayOrder = map[string]map[string][]string{}
 
 	for _, f := range m.allFiles {
-		year := f.ModTime.Format("2006")
-		month := f.ModTime.Format("2006-01")
-		day := f.ModTime.Format("2006-01-02")
+		// Group by DateTaken so the tree matches the destination layout that
+		// DestRelPath produces, not the date the card happened to be written.
+		taken := f.DateTaken()
+		year := taken.Format("2006")
+		month := taken.Format("2006-01")
+		day := taken.Format("2006-01-02")
 
 		if m.tree[year] == nil {
 			m.tree[year] = map[string]map[string][]scan.FileInfo{}

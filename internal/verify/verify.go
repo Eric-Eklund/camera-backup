@@ -91,13 +91,24 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 		"photos": scan.IndexByRelPath(nasPhotoFiles),
 		"videos": scan.IndexByRelPath(nasVideoFiles),
 	}
+	// Secondary lookup by basename+size, for copies that sit under a different
+	// date than the authority now computes — files backed up before capture
+	// times were read, or whose source modtime changed after the copy.
+	ssdByNameSize := map[string]map[string]scan.FileInfo{
+		"photos": scan.IndexByNameSize(ssdIndex["photos"]),
+		"videos": scan.IndexByNameSize(ssdIndex["videos"]),
+	}
+	nasByNameSize := map[string]map[string]scan.FileInfo{
+		"photos": scan.IndexByNameSize(nasIndex["photos"]),
+		"videos": scan.IndexByNameSize(nasIndex["videos"]),
+	}
 	ssdCatAvail := map[string]bool{"photos": ssdPhotosAvail, "videos": ssdVideosAvail}
 	nasCatAvail := map[string]bool{"photos": nasPhotosAvail, "videos": nasVideosAvail}
 
 	var authorityFiles []scan.FileInfo
 	var err error
 	if sourceAvail {
-		authorityFiles, err = scan.Walk(source, exts)
+		authorityFiles, err = scan.WalkSource(source, exts)
 		if err != nil {
 			return err
 		}
@@ -138,7 +149,7 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 			}
 		}
 		if ssdCatAvail[cat] {
-			if ssd, ok := findBySize(ssdIndex[cat], f.DestKey(), f.Size); ok {
+			if ssd, ok := findCopy(ssdIndex[cat], ssdByNameSize[cat], f); ok {
 				ssdHash, err = hash(ssd.AbsPath, f.RelPath, "ssd")
 				if err != nil {
 					res.Issues = append(res.Issues, fmt.Sprintf("SSD read error: %v", err))
@@ -149,7 +160,7 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 			}
 		}
 		if nasCatAvail[cat] {
-			if nas, ok := findBySize(nasIndex[cat], f.DestKey(), f.Size); ok {
+			if nas, ok := findCopy(nasIndex[cat], nasByNameSize[cat], f); ok {
 				nasHash, err = hash(nas.AbsPath, f.RelPath, "nas")
 				if err != nil {
 					res.Issues = append(res.Issues, fmt.Sprintf("NAS read error: %v", err))
@@ -179,6 +190,19 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 		}
 	}
 	return nil
+}
+
+// findCopy locates f's copy in one destination root. It looks under the date
+// path f computes now, then — because that path changed when capture times
+// started being read — anywhere in the tree by basename+size. This mirrors how
+// scan.MissingFromDest decides a file is already present, so verify never
+// reports "missing" for a file copy would skip.
+func findCopy(byRelPath, byNameSize map[string]scan.FileInfo, f scan.FileInfo) (scan.FileInfo, bool) {
+	if e, ok := findBySize(byRelPath, f.DestKey(), f.Size); ok {
+		return e, true
+	}
+	e, ok := byNameSize[scan.NameSizeKey(f.RelPath, f.Size)]
+	return e, ok
 }
 
 // findBySize returns the destination entry for key whose size matches size:

@@ -159,3 +159,42 @@ func TestVerify_SSDAuthorityWhenCameraAbsent(t *testing.T) {
 		t.Errorf("issues = %v, want [missing from NAS]", issues)
 	}
 }
+
+// TestVerify_CopyUnderDifferentDatePath covers backups whose copy does not sit
+// under the date the camera file resolves to now — the case every existing
+// backup landed in once files started being filed by capture date instead of
+// modtime. verify must find such a copy by basename+size, the same way a copy
+// run decides the file is already present, or every previously backed-up file
+// would be reported missing.
+func TestVerify_CopyUnderDifferentDatePath(t *testing.T) {
+	cfg, cam, ssd := setup(t)
+	const content = "shot years before it was copied"
+	otherDate := filepath.Join("2012", "2012-08", "2012-08-05")
+
+	writeFile(t, filepath.Join(cam, "DCIM/DSC_0009.JPG"), content)
+	writeFile(t, filepath.Join(ssd, otherDate, "DSC_0009.JPG"), content)
+
+	if issues := run(t, cfg); len(issues) != 0 {
+		t.Errorf("issues = %v, want none — the copy exists, just under another date", issues)
+	}
+}
+
+// TestVerify_DifferentDateDifferentSizeIsMissing guards the fallback above from
+// hiding a genuinely absent file: a same-name copy of a different size is not a
+// match, wherever in the tree it sits.
+func TestVerify_DifferentDateDifferentSizeIsMissing(t *testing.T) {
+	cfg, cam, ssd := setup(t)
+	otherDate := filepath.Join("2012", "2012-08", "2012-08-05")
+
+	writeFile(t, filepath.Join(cam, "DCIM/DSC_0010.JPG"), "the real thing")
+	writeFile(t, filepath.Join(ssd, otherDate, "DSC_0010.JPG"), "a truncated copy")
+
+	issues := run(t, cfg)
+	if len(issues) != 1 {
+		t.Fatalf("issues = %v, want the file flagged", issues)
+	}
+	got := issues[filepath.ToSlash(filepath.Join("DCIM", "DSC_0010.JPG"))]
+	if len(got) != 1 || got[0] != "missing from SSD" {
+		t.Errorf("issues = %v, want [missing from SSD]", issues)
+	}
+}

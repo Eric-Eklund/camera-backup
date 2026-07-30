@@ -17,13 +17,32 @@ type FileInfo struct {
 	AbsPath string
 	// Size in bytes.
 	Size int64
-	// ModTime is used to compute the date component on the destination.
+	// ModTime is the filesystem modification time. It is what decides whether a
+	// file is still being written (SplitStable) and what the destination copy is
+	// stamped with — not, on its own, where the file is filed.
 	ModTime time.Time
+	// CaptureTime is when the camera recorded the file, read from EXIF or the
+	// video header by CaptureTime(). Zero when the file carries no such
+	// metadata; use DateTaken() rather than reading this directly.
+	CaptureTime time.Time
 }
 
 // Key returns a canonical lookup key for the source (lowercased RelPath).
 func (f FileInfo) Key() string {
 	return strings.ToLower(f.RelPath)
+}
+
+// DateTaken returns the date the file should be filed under: the camera's
+// capture time when the file carries one, otherwise the filesystem modtime.
+//
+// The modtime alone is not enough — copying a card to an external drive with a
+// file manager stamps every file with "now", which would bury a whole shoot
+// under the date it was copied.
+func (f FileInfo) DateTaken() time.Time {
+	if !f.CaptureTime.IsZero() {
+		return f.CaptureTime
+	}
+	return f.ModTime
 }
 
 // DestRelPath returns the expected relative path under a destination root.
@@ -34,9 +53,10 @@ func (f FileInfo) Key() string {
 //
 // Always uses forward slashes so keys are consistent across platforms.
 func (f FileInfo) DestRelPath() string {
-	year := f.ModTime.Format("2006")
-	month := f.ModTime.Format("2006-01")
-	day := f.ModTime.Format("2006-01-02")
+	taken := f.DateTaken()
+	year := taken.Format("2006")
+	month := taken.Format("2006-01")
+	day := taken.Format("2006-01-02")
 	return path.Join(year, month, day, filepath.Base(f.RelPath))
 }
 
@@ -170,10 +190,7 @@ func IndexByKey(files []FileInfo) map[string]FileInfo {
 // whose basename and size already exist anywhere in the destination tree is
 // also skipped.
 func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
-	byNameSize := make(map[string]struct{}, len(dstIndex))
-	for _, d := range dstIndex {
-		byNameSize[nameSizeKey(d.RelPath, d.Size)] = struct{}{}
-	}
+	byNameSize := IndexByNameSize(dstIndex)
 	var out []FileInfo
 	for _, f := range src {
 		key := f.DestKey()
@@ -184,7 +201,7 @@ func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
 		if found && collisionCopyExists(key, f.Size, dstIndex) {
 			continue
 		}
-		if _, ok := byNameSize[nameSizeKey(f.RelPath, f.Size)]; ok {
+		if _, ok := byNameSize[NameSizeKey(f.RelPath, f.Size)]; ok {
 			continue
 		}
 		out = append(out, f)
@@ -192,10 +209,22 @@ func MissingFromDest(src []FileInfo, dstIndex map[string]FileInfo) []FileInfo {
 	return out
 }
 
-// nameSizeKey identifies a file by lowercased basename and size, independent
+// NameSizeKey identifies a file by lowercased basename and size, independent
 // of which date directory it sits in.
-func nameSizeKey(relPath string, size int64) string {
+func NameSizeKey(relPath string, size int64) string {
 	return fmt.Sprintf("%s|%d", strings.ToLower(path.Base(relPath)), size)
+}
+
+// IndexByNameSize re-keys a destination index by NameSizeKey, so a file can be
+// found regardless of which date directory it ended up in. Used to recognise
+// files copied before capture-time filing existed, and files whose source
+// modtime changed after they were copied.
+func IndexByNameSize(dstIndex map[string]FileInfo) map[string]FileInfo {
+	m := make(map[string]FileInfo, len(dstIndex))
+	for _, d := range dstIndex {
+		m[NameSizeKey(d.RelPath, d.Size)] = d
+	}
+	return m
 }
 
 // collisionCopyExists reports whether a _N collision variant of key exists in

@@ -367,6 +367,15 @@ func (m *Model) renderDetailPanel(w, h int) string {
 	return strings.Join(lines[:h], "\n")
 }
 
+// noPreviewNote explains an empty preview area. A missing exiftool is by far
+// the most common reason on a fresh machine, and it is worth naming.
+func (m *Model) noPreviewNote() string {
+	if m.rawToolMissing {
+		return "[no preview — install exiftool for RAW files]"
+	}
+	return "[no preview]"
+}
+
 func (m *Model) renderFileDetail(f *scan.FileInfo, w, h int) []string {
 	var lines []string
 	add := func(s string) {
@@ -375,8 +384,16 @@ func (m *Model) renderFileDetail(f *scan.FileInfo, w, h int) []string {
 
 	add(styleHeader.Render(filepath.Base(f.RelPath)))
 	add(styleDetailLabel.Render("Size:  ") + styleDetailValue.Render(fmtBytes(f.Size)))
-	add(styleDetailLabel.Render("Date:  ") + styleDetailValue.Render(f.ModTime.Format("2006-01-02")))
-	add(styleDetailLabel.Render("Time:  ") + styleDetailValue.Render(f.ModTime.Format("15:04:05")))
+	// Date/Time show the capture time, since that is what decides the
+	// destination directory. "(file date)" marks a fallback to the modtime, so
+	// an unexpected date is traceable to metadata the file does not carry.
+	taken := f.DateTaken()
+	date := taken.Format("2006-01-02")
+	if f.CaptureTime.IsZero() {
+		date += styleDim.Render(" (file date)")
+	}
+	add(styleDetailLabel.Render("Date:  ") + styleDetailValue.Render(date))
+	add(styleDetailLabel.Render("Time:  ") + styleDetailValue.Render(taken.Format("15:04:05")))
 	add(styleDetailLabel.Render("Src:   ") + styleDetailValue.Render(truncate(f.AbsPath, w-8)))
 	add("")
 
@@ -391,7 +408,7 @@ func (m *Model) renderFileDetail(f *scan.FileInfo, w, h int) []string {
 					lines = append(lines, al)
 				}
 			} else {
-				add(styleDim.Render("  [no preview]"))
+				add(styleDim.Render("  " + m.noPreviewNote()))
 			}
 		} else {
 			add(styleDim.Render("  Loading…"))
@@ -559,13 +576,13 @@ func (m *Model) renderPreview() string {
 	case img != nil:
 		content = preview.BlockArt(img, previewW, previewH)
 	case haveFull:
-		content = styleDim.Render("\n\n  [no preview available]")
+		content = styleDim.Render("\n\n  " + m.noPreviewNote())
 	default:
 		content = styleDim.Render("\n\n  Loading…")
 	}
 
 	meta := styleDim.Render(fmt.Sprintf(" %s · %s · %d/%d",
-		fmtBytes(f.Size), f.ModTime.Format("2006-01-02 15:04"), m.gridCursor+1, len(files)))
+		fmtBytes(f.Size), f.DateTaken().Format("2006-01-02 15:04"), m.gridCursor+1, len(files)))
 
 	return m.screenFrame(name, meta+"\n"+content, "[←/→] prev/next  [Esc] back")
 }
