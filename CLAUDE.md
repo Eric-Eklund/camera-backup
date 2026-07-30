@@ -54,7 +54,7 @@ Six subcommands (Cobra CLI):
 | `internal/checksum` | SHA256 with optional progress writer |
 | `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI |
 | `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
-| `internal/preview` | Thumbnails (JPEG direct, NEF via exiftool), ANSI block art, Kitty Graphics Protocol |
+| `internal/preview` | Thumbnails (JPEG direct, RAW via exiftool), ANSI block art, Kitty Graphics Protocol |
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher, settings screen (`settings.go`) |
 | `internal/ui` | Terminal colors, progress bar, `Prompt()`, `AskYesNo()`, `FreeSpace()` |
 
@@ -111,6 +111,35 @@ This split lets the user disconnect and power off the camera between phases. Pha
 
 A direct dump (Source → NAS) uses the Phase 1 transform against the NAS roots — see "Direct Source → NAS mode" above.
 
+### Which date a file is filed under
+
+`DestRelPath()` uses `FileInfo.DateTaken()`: the **capture time** when the file
+carries one, the filesystem modtime otherwise. The modtime alone is wrong for a
+source that was written by something other than the camera — copying a card to
+an external drive with a file manager stamps every file with "now", which would
+bury a whole shoot under the date it was copied.
+
+- `scan.CaptureTime()` parses the metadata itself, in pure Go — no exiftool, so
+  a scan works on a bare system. EXIF (`DateTimeOriginal`, then
+  `DateTimeDigitized`, then IFD0 `DateTime`) for JPEG and every TIFF-based RAW
+  (NEF, CR2, ARW, DNG, ORF, RW2, PEF), the wrapped JPEG's EXIF for Fujifilm RAF,
+  and `moov`/`mvhd` for MP4/MOV. HEIC/AVIF are not parsed and fall back to the
+  modtime. An all-zero date (camera clock never set) counts as absent.
+- EXIF timestamps carry no zone — they are the camera's local wall clock, so
+  they are read as local time. QuickTime times are UTC and converted.
+- `scan.WalkSource()` = `Walk` + `FillCaptureTimes` (bounded worker pool).
+  **Only source scans use it**; destinations are compared by relative path, so
+  reading headers for thousands of files over a NAS share would cost time for
+  nothing.
+- `SplitStable` deliberately keeps using `ModTime` — a file written to the card
+  seconds ago is still being written however old the shot inside it is. The
+  destination copy is also still stamped with the source modtime.
+- Backups made before this existed sit under their modtime's date. Nothing
+  re-copies them: `MissingFromDest` already skips a source whose basename+size
+  exists anywhere in the destination tree. `verify` needs the same fallback and
+  gets it from `findCopy` (`scan.IndexByNameSize`) — without it every
+  previously backed-up file would be reported missing.
+
 Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also skips a source whose basename+size already exists **anywhere** in the destination tree — a source-modtime change (e.g. a file manager restoring timestamps after writing to the card) must not duplicate the file under a second date directory.
 
 Source files whose modtime is within `scan.StableAge` (10 s) of the scan are treated as still being written and skipped with a warning (`scan.SplitStable`, applied in `runCopy`, `runDirect` and `status.Compute` → `StatusResult.CameraUnstable`); copying mid-write would produce a truncated destination. Far-future modtimes (wrong camera clock) are treated as stable.
@@ -136,6 +165,9 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 - Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1); NAS copies also honour `nas_write_timeout_seconds` and `nas_sync_order`. The write timeout is per-destination, not per-mode: pass it for any copy landing on the NAS (including verified direct dumps) and 0 for local Camera→SSD copies
 - All copy batches are launched through `Model.launchBatch` (progress reset, screen switch, worker pool + drain wiring) — add new modes there rather than duplicating the plumbing
 - Kitty graphics used for full-screen preview when `KittySupported()` (Ghostty/Kitty); block-art fallback otherwise; RAW previews need exiftool in PATH
+- RAW previews come from whichever embedded image a file actually has. **Nikon NEF has no `ThumbnailImage`** — asking exiftool for that tag alone returns zero bytes, which is why NEF thumbnails were blank in both the list and the grid. `preview.Thumbnail` tries `PreviewImage` → `ThumbnailImage` → `JpgFromRaw` → `ThumbnailTIFF` (small first, so one exiftool call suffices for NEF/CR2/ARW); `FullImage` tries the same set largest-first. `ThumbnailTIFF` is why `golang.org/x/image/tiff` is registered as a decoder
+- A failed thumbnail load is cached as nil like an unsupported one — without an entry the view would re-request it on every render. `preview.ErrNoRAWTool` sets `Model.rawToolMissing`, so the empty panel says to install exiftool instead of just `[no preview]`
+- The date tree, the detail panel and the preview footer all show `DateTaken()`, so what the TUI groups by matches where `copy` will actually put the file; a fallback to the modtime is marked `(file date)`
 
 ### Settings screen
 

@@ -98,7 +98,7 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 
 	if r.SourceAvail {
 		var err error
-		r.CameraFiles, err = scan.Walk(source, exts)
+		r.CameraFiles, err = scan.WalkSource(source, exts)
 		if err != nil {
 			return nil, err
 		}

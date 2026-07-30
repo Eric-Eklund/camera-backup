@@ -187,7 +187,8 @@ copy/sync/verify with live parallel progress bars.
 - Copies show per-file progress bars plus overall throughput and ETA;
   `q`/`esc` cancels gracefully (files in progress finish, the queue stops)
 - `?` opens a help screen with all keybindings, `v` runs verify, `q` quits
-- Image previews: JPEG directly; NEF via `exiftool` (optional dependency);
+- Image previews: JPEG directly; RAW (NEF, CR2, ARW, DNG, …) via `exiftool`
+  (optional dependency) reading whichever preview the file embeds;
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
 - `c` opens a **settings screen** that edits config.toml in place — see below
 - Devices are watched — plugging in the SD card (or any `extra_sources` device)
@@ -318,9 +319,9 @@ direct_to_nas = true
   the card.
 - **Same layout.** Files land in the usual `year/month/day` tree under the NAS
   category roots, so a direct dump and a staged backup are interchangeable.
-  Because the destination path comes from each file's modification time, an
-  external drive that already holds a `year/month/day` tree lands in the same
-  places on the NAS.
+  Because the destination path comes from each file's capture date, an external
+  drive that already holds a `year/month/day` tree lands in the same places on
+  the NAS — even if copying the files onto that drive reset their timestamps.
 - **The SSD keys become optional.** Leave `ssd_photos`/`ssd_videos` out
   entirely, or keep them so `camera-backup sync` can still push an existing SSD
   tree to the NAS. Either way, `copy` and the TUI bypass the SSD, and the SSD
@@ -379,7 +380,20 @@ low so a hang costs one timeout per file instead of a frozen terminal.
 
 ## Directory structure on destination
 
-Files are organised by shoot date (taken from the file's modification time) in a year → month → day hierarchy directly under each category's destination directory. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
+Files are organised by shoot date in a year → month → day hierarchy directly under each category's destination directory. The DCIM folder structure from the camera is not preserved — filenames are kept flat under the day folder.
+
+The shoot date is read from the file's own metadata: the EXIF capture date for
+photos (JPEG and RAW — NEF, CR2, ARW, DNG, ORF, RW2, RAF), the recording time
+from the movie header for MP4/MOV. The file's modification time is used only when
+a file carries no such metadata.
+
+This matters as soon as the files reach you via anything other than the camera.
+Copying a card to an external drive with a file manager, restoring a backup or
+unpacking an archive stamps every file with *now* — filing by modification time
+would bury a whole shoot under the date you happened to copy it. Reading the
+capture date puts each shot under the day it was taken, whatever the file
+timestamps say. No external tool is needed for this; the metadata is parsed
+directly.
 
 ```
 /mnt/ssd/Photos/                      /mnt/ssd/Videos/
@@ -458,7 +472,7 @@ go build -o camera-backup ./cmd/camera-backup
 ```
 
 Copy the `camera-backup` binary and your `config.toml` (created from
-`config-template.toml`) to a directory of your choice and run from any terminal. For RAW (.NEF) previews in the TUI, install `exiftool`.
+`config-template.toml`) to a directory of your choice and run from any terminal. For RAW previews in the TUI, install `exiftool` (`sudo apt install libimage-exiftool-perl`).
 
 ---
 
@@ -502,7 +516,11 @@ camera-backup/
 | `golang.org/x/image` | Thumbnail scaling |
 
 Optional runtime dependency: **exiftool** — used by the TUI to extract embedded
-previews from RAW (.NEF) files. Without it, RAW files show metadata only.
+previews from RAW files (.NEF, .CR2, .ARW, .DNG, …). Without it, RAW files show
+metadata only and the preview panel says so. Only previews depend on it; capture
+dates are read without any external tool.
+
+On Debian/Ubuntu: `sudo apt install libimage-exiftool-perl`.
 
 ---
 
