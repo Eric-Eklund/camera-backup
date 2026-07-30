@@ -40,6 +40,7 @@ const (
 	modePhase1 progressMode = iota // Camera→SSD verify
 	modePhase2                     // SSD→NAS fast
 	modeSync                       // SSD→NAS sync (no camera)
+	modeDirect                     // source→NAS verify, local SSD bypassed
 	modeVerify
 )
 
@@ -277,13 +278,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.failures += msg.failures
 		m.cancelBatch = nil
 		m.screen = screenDone
+		// A direct dump leaves the NAS as the only copy, so an incomplete run
+		// has to say plainly that the card is not safe to format yet.
+		cardWarning := ""
+		if m.progressMode == modeDirect {
+			cardWarning = " Do not format the card yet."
+		}
 		switch {
 		case m.cancelling:
-			m.doneMsg = fmt.Sprintf("Cancelled: %d of %d files copied (%d skipped).",
-				m.copyDone-m.failures, m.copyTotal, m.copyTotal-m.copyDone)
+			m.doneMsg = fmt.Sprintf("Cancelled: %d of %d files copied (%d skipped).%s",
+				m.copyDone-m.failures, m.copyTotal, m.copyTotal-m.copyDone, cardWarning)
 		case m.failures > 0:
-			m.doneMsg = fmt.Sprintf("Copy finished: %d of %d files copied, %d failed.%s",
-				m.copyDone-m.failures, m.copyTotal, m.failures, skippedNote(m.skippedNoRoot))
+			m.doneMsg = fmt.Sprintf("Copy finished: %d of %d files copied, %d failed.%s%s",
+				m.copyDone-m.failures, m.copyTotal, m.failures, skippedNote(m.skippedNoRoot), cardWarning)
+		case m.progressMode == modeDirect:
+			m.doneMsg = fmt.Sprintf("Direct dump complete: %d file(s) copied and verified on the NAS.%s",
+				m.copyDone, skippedNote(m.skippedNoRoot))
 		default:
 			m.doneMsg = fmt.Sprintf("Copy complete: %d files.%s", m.copyDone, skippedNote(m.skippedNoRoot))
 		}
@@ -448,10 +458,14 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "tab":
-		m.setTab((m.activeTab + 1) % len(m.tabs))
+		if len(m.tabs) > 0 {
+			m.setTab((m.activeTab + 1) % len(m.tabs))
+		}
 
 	case "shift+tab":
-		m.setTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
+		if len(m.tabs) > 0 {
+			m.setTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
+		}
 
 	case "j", "down":
 		if m.cursor < len(m.visible)-1 {
@@ -793,7 +807,9 @@ func (m *Model) buildTabs() {
 	m.tabKeys = nil
 	r := m.status
 
-	if r.SourceAvail || r.SSDAvail() {
+	// With no source device the SSD tree is browsable instead — but not in
+	// direct mode, where the SSD is not part of the picture at all.
+	if r.SourceAvail || (r.SSDAvail() && m.cfg.SSDInUse()) {
 		count := len(r.CameraFiles)
 		if !r.SourceAvail {
 			count = len(r.SSDFiles)
@@ -801,7 +817,9 @@ func (m *Model) buildTabs() {
 		m.tabs = append(m.tabs, fmt.Sprintf("All (%d)", count))
 		m.tabKeys = append(m.tabKeys, tabAll)
 	}
-	if r.SourceAvail && r.SSDAvail() {
+	// In direct mode the SSD takes no part in the run, so there is nothing
+	// meaningful to be "missing" from it.
+	if r.SourceAvail && r.SSDAvail() && m.cfg.SSDInUse() {
 		m.tabs = append(m.tabs, fmt.Sprintf("Missing on SSD (%d)", len(r.MissingOnSSD)))
 		m.tabKeys = append(m.tabKeys, tabMissingOnSSD)
 	}
@@ -995,9 +1013,28 @@ func (m *Model) resetProgress(total int, totalBytes int64) {
 	m.cancelling = false
 }
 
+// launchBatch starts a copy batch: it resets per-batch progress state, switches
+// to the progress screen, and wires the worker pool to the progress drain.
+// mkDone builds the message emitted once every progress event has been
+// forwarded (see drainProgressCmd).
+func (m *Model) launchBatch(mode progressMode, tasks []copyop.Task, doVerify bool, writeTimeout time.Duration, workers int, mkDone func(failures int) tea.Msg) tea.Cmd {
+	m.resetProgress(len(tasks), copyop.TotalSize(tasks))
+	m.progressMode = mode
+	m.screen = screenProgress
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelBatch = cancel
+	events := make(chan copyop.FileProgress, 64)
+	result := make(chan int, 1)
+	return tea.Batch(
+		runBatchCmd(ctx, tasks, m.logger, doVerify, writeTimeout, workers, events, result),
+		drainProgressCmd(events, result, m.p, mkDone),
+		progressTickCmd(),
+	)
+}
+
 // startCopy determines which phase(s) to run and launches them.
-// If a selection is active, only selected files are copied (camera→SSD and
-// sync modes); Phase 2 after a camera copy always pushes everything missing.
+// If a selection is active, only selected files are copied (camera→SSD, direct
+// and sync modes); Phase 2 after a camera copy always pushes everything missing.
 // Files whose category root is unmounted are skipped and reported.
 func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 	if m.status == nil {
@@ -1010,6 +1047,34 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 	m.skippedNoRoot = 0
 
 	switch {
+	case m.cfg.DirectToNAS && r.SourceAvail && r.NASAvail():
+		// Direct dump: source→NAS with verification, local SSD bypassed.
+		missing := m.selectedIn(r.MissingOnNAS)
+		if len(m.selected) > 0 && len(missing) == 0 {
+			m.statusMsg = "No selected files need copying to the NAS."
+			return m, nil
+		}
+		tasks, skipped := buildDirectTasks(missing, m.cfg, r)
+		m.skippedNoRoot = skipped
+		if len(tasks) == 0 {
+			if skipped > 0 {
+				m.statusMsg = fmt.Sprintf("%d file(s) skipped — NAS category root not mounted.", skipped)
+			} else {
+				m.statusMsg = "NAS is already up to date."
+			}
+			return m, nil
+		}
+		if err := copyop.CheckSpace(tasks); err != nil {
+			m.statusMsg = err.Error()
+			return m, nil
+		}
+		return m, m.launchBatch(modeDirect, tasks, true, m.cfg.NASWriteTimeout(), m.cfg.NASWorkerCount(),
+			func(f int) tea.Msg { return copyDoneMsg{failures: f} })
+
+	case m.cfg.DirectToNAS && r.SourceAvail:
+		m.statusMsg = "Direct mode: NAS not available — mount the share (or connect the VPN) and rescan."
+		return m, nil
+
 	case r.SourceAvail && r.SSDAvail():
 		// Phase 1: Camera→SSD (with verify); Phase 2: SSD→NAS (if available).
 		missing := m.selectedIn(r.MissingOnSSD)
@@ -1036,21 +1101,13 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 			m.statusMsg = err.Error()
 			return m, nil
 		}
-		m.resetProgress(len(tasks), copyop.TotalSize(tasks))
-		m.progressMode = modePhase1
-		m.screen = screenProgress
-		ctx, cancel := context.WithCancel(context.Background())
-		m.cancelBatch = cancel
-		events := make(chan copyop.FileProgress, 64)
-		result := make(chan int, 1)
-		return m, tea.Batch(
-			runBatchCmd(ctx, tasks, m.logger, true, 0, m.cfg.SSDWorkerCount(), events, result),
-			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return phase1DoneMsg{failures: f} }),
-			progressTickCmd(),
-		)
+		return m, m.launchBatch(modePhase1, tasks, true, 0, m.cfg.SSDWorkerCount(),
+			func(f int) tea.Msg { return phase1DoneMsg{failures: f} })
 
-	case !r.SourceAvail && r.SSDAvail() && r.NASAvail():
-		// Sync SSD→NAS only.
+	case !r.SourceAvail && r.SSDAvail() && r.NASAvail() && m.cfg.SSDInUse():
+		// Sync SSD→NAS only. Never in direct mode: the SSD is hidden from the
+		// UI there, so copying from it behind the user's back would be a
+		// surprise — `camera-backup sync` is the explicit way to ask for it.
 		missing := m.selectedIn(r.MissingOnNAS)
 		if len(m.selected) > 0 && len(missing) == 0 {
 			m.statusMsg = "No selected files need syncing to NAS."
@@ -1070,21 +1127,13 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 			m.statusMsg = err.Error()
 			return m, nil
 		}
-		m.resetProgress(len(tasks), copyop.TotalSize(tasks))
-		m.progressMode = modeSync
-		m.screen = screenProgress
-		ctx, cancel := context.WithCancel(context.Background())
-		m.cancelBatch = cancel
-		events := make(chan copyop.FileProgress, 64)
-		result := make(chan int, 1)
-		return m, tea.Batch(
-			runBatchCmd(ctx, tasks, m.logger, false, m.cfg.NASWriteTimeout(), m.cfg.NASWorkerCount(), events, result),
-			drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
-			progressTickCmd(),
-		)
+		return m, m.launchBatch(modeSync, tasks, false, m.cfg.NASWriteTimeout(), m.cfg.NASWorkerCount(),
+			func(f int) tea.Msg { return copyDoneMsg{failures: f} })
 
 	default:
 		switch {
+		case m.cfg.DirectToNAS && !r.SourceAvail:
+			m.statusMsg = "Direct mode: no source device mounted — insert a card or connect a drive."
 		case r.SourceAvail && !r.SSDAvail():
 			m.statusMsg = "Camera found but no SSD root is mounted — cannot copy."
 		case !r.SourceAvail && r.SSDAvail() && !r.NASAvail():
@@ -1103,20 +1152,10 @@ func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
 		m.doneMsg = err.Error()
 		return m, nil
 	}
-	m.resetProgress(len(m.phase2Tasks), copyop.TotalSize(m.phase2Tasks))
 	m.failures = 0
 	m.failedFiles = nil
-	m.progressMode = modePhase2
-	m.screen = screenProgress
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelBatch = cancel
-	events := make(chan copyop.FileProgress, 64)
-	result := make(chan int, 1)
-	return m, tea.Batch(
-		runBatchCmd(ctx, m.phase2Tasks, m.logger, false, m.cfg.NASWriteTimeout(), m.cfg.NASWorkerCount(), events, result),
-		drainProgressCmd(events, result, m.p, func(f int) tea.Msg { return copyDoneMsg{failures: f} }),
-		progressTickCmd(),
-	)
+	return m, m.launchBatch(modePhase2, m.phase2Tasks, false, m.cfg.NASWriteTimeout(), m.cfg.NASWorkerCount(),
+		func(f int) tea.Msg { return copyDoneMsg{failures: f} })
 }
 
 // startVerify launches the verify pass with live per-file progress.

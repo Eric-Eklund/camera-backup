@@ -22,15 +22,23 @@ go run ./cmd/camera-backup --config testdata/config.toml status
 go run ./cmd/camera-backup --config testdata/config.toml copy
 go run ./cmd/camera-backup --config testdata/config.toml verify -v
 go run ./cmd/camera-backup --config testdata/config.toml tui
+
+# Direct Source → NAS path (direct_to_nas = true, no ssd_* keys)
+go run ./cmd/camera-backup --config testdata/config-direct.toml status
+go run ./cmd/camera-backup --config testdata/config-direct.toml dump
+go run ./cmd/camera-backup --config testdata/config-direct.toml tui
 ```
 
 ## Architecture
 
-Three-stage incremental backup pipeline: **Camera → SSD → NAS**
+Three-stage incremental backup pipeline: **Camera → SSD → NAS**, plus a
+**direct Source → NAS** path that bypasses the local SSD (`dump`, or
+`direct_to_nas = true`).
 
-Five subcommands (Cobra CLI):
+Six subcommands (Cobra CLI):
 - `status` — scans all three destinations and shows missing file counts + free space
-- `copy` — Camera→SSD (CopyAndVerify) then SSD→NAS (fast Copy)
+- `copy` — Camera→SSD (CopyAndVerify) then SSD→NAS (fast Copy); runs `runDirect` instead when `direct_to_nas` is set
+- `dump` — Source→NAS directly (CopyAndVerify), no local SSD; same `--videos-only/-v`, `--photos-only/-p` and `--order` flags as `sync`. Always available, regardless of `direct_to_nas`
 - `sync` — SSD→NAS only, no camera required; `--videos-only/-v` and `--photos-only/-p` filter by category (mutually exclusive); `--order=size-asc` sorts the batch smallest-first; default order comes from `nas_sync_order` (videos first when unset)
 - `verify` — deep SHA256 check; uses camera as authority, falls back to SSD if camera absent
 - `tui` — interactive bubbletea TUI wrapping all of the above with parallel copy workers
@@ -39,16 +47,46 @@ Five subcommands (Cobra CLI):
 
 | Package | Role |
 |---|---|
-| `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` orchestration, logging init |
-| `internal/config` | TOML loading, extension matching, `Category()` (photos/videos), worker counts |
+| `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` + `runDirect()` orchestration, logging init |
+| `internal/config` | TOML loading, extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SSDInUse()` |
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
-| `internal/copyop` | `CopyAndVerify` (Sync+SHA256, Camera→SSD), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
+| `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
 | `internal/checksum` | SHA256 with optional progress writer |
 | `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI |
 | `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
 | `internal/preview` | Thumbnails (JPEG direct, NEF via exiftool), ANSI block art, Kitty Graphics Protocol |
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher |
 | `internal/ui` | Terminal colors, progress bar, `Prompt()`, `AskYesNo()`, `FreeSpace()` |
+
+### Source devices
+
+`source` plus the optional `extra_sources` list form an ordered set of source
+candidates; `config.ActiveSource()` returns the first one that exists as a
+directory (falling back to `source` so messages name a real path). Everything
+downstream — `status.Compute`, `verify`, `runCopy`, `runDirect` — resolves the
+source through it rather than reading `cfg.Source`, so plugging in either a card
+reader or an external drive just works. The TUI's fsnotify watcher watches the
+parent of every candidate.
+
+### Direct Source → NAS mode
+
+`direct_to_nas = true` takes the local SSD out of the copy path: `copy` and the
+TUI's `y` run a single verified Source→NAS pass. `dump` does the same on demand
+without the setting. Notes:
+
+- Destination paths use `DestRelPath()` (year/month/day), the same transform as
+  Camera→SSD — so a direct dump and a staged backup produce identical trees, and
+  an external drive that already holds a date tree lands in the same places.
+  Comparison is therefore `MissingFromDest` (date keys), not `MissingByRelPath`.
+- Direct copies are **always verified** (`CopyAndVerify` / `doVerify: true`) —
+  the NAS copy is the only copy. They also honour `nas_write_timeout_seconds`.
+- `ssd_photos`/`ssd_videos` become optional, but a lone key is still rejected.
+  `direct_to_nas` requires the NAS keys. `cfg.SSDInUse()` (configured **and** not
+  direct) is what UI code should ask before showing SSD state: in direct mode
+  `status` reports the SSD as *bypassed*, `MissingOnSSD` is not computed, and the
+  TUI hides the SSD badge, the ✓SSD column and the "Missing on SSD" tab.
+- `sync` still works in direct mode when SSD roots are configured — it is an
+  explicit SSD→NAS request.
 
 ### Destination roots
 
@@ -71,9 +109,11 @@ Phase 2 (SSD → NAS) preserves relative paths within each category pair — no 
 
 This split lets the user disconnect and power off the camera between phases. Phase 2 is optional and skipped gracefully if NAS is unavailable. In the TUI, Phase 2 tasks are always rescanned from the SSD after Phase 1 completes — never built from camera paths.
 
+A direct dump (Source → NAS) uses the Phase 1 transform against the NAS roots — see "Direct Source → NAS mode" above.
+
 Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also skips a source whose basename+size already exists **anywhere** in the destination tree — a source-modtime change (e.g. a file manager restoring timestamps after writing to the card) must not duplicate the file under a second date directory.
 
-Source files whose modtime is within `scan.StableAge` (10 s) of the scan are treated as still being written and skipped with a warning (`scan.SplitStable`, applied in `runCopy` and `status.Compute` → `StatusResult.CameraUnstable`); copying mid-write would produce a truncated destination. Far-future modtimes (wrong camera clock) are treated as stable.
+Source files whose modtime is within `scan.StableAge` (10 s) of the scan are treated as still being written and skipped with a warning (`scan.SplitStable`, applied in `runCopy`, `runDirect` and `status.Compute` → `StatusResult.CameraUnstable`); copying mid-write would produce a truncated destination. Far-future modtimes (wrong camera clock) are treated as stable.
 
 ### Key invariants
 
@@ -93,7 +133,8 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 - Selection (`space`/`a`) filters what `y` copies; empty selection = copy everything. `y` also works from the grid view
 - Grid view scrolls: `gridOffset` + `gridScrollToCursor()` keep the cursor row visible; thumbnails load incrementally for the visible window plus one lookahead row (no fixed cap)
 - `?` opens the help screen (from main and grid); the Files panel title shows the visible row range (`Files 28–53/68`) when the tree overflows
-- Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1); NAS copies also honour `nas_write_timeout_seconds` and `nas_sync_order` — the timeout never applies to verified Camera→SSD copies
+- Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1); NAS copies also honour `nas_write_timeout_seconds` and `nas_sync_order`. The write timeout is per-destination, not per-mode: pass it for any copy landing on the NAS (including verified direct dumps) and 0 for local Camera→SSD copies
+- All copy batches are launched through `Model.launchBatch` (progress reset, screen switch, worker pool + drain wiring) — add new modes there rather than duplicating the plumbing
 - Kitty graphics used for full-screen preview when `KittySupported()` (Ghostty/Kitty); block-art fallback otherwise; RAW previews need exiftool in PATH
 
 ### Verifying TUI changes

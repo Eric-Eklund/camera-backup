@@ -106,21 +106,27 @@ func (m *Model) renderHeaderRow() string {
 	return tabs + strings.Repeat(" ", gap) + dev
 }
 
-// renderDeviceHeader renders the compact device status: ✔ Camera · ✔ SSD 412 GB · ✘ NAS.
+// renderDeviceHeader renders the compact device status: ✔ Source · ✔ SSD 412 GB · ✘ NAS.
 // Devices with split photo/video roots get a partial marker (⚠ SSD ✔P ✘V)
-// when only one root is mounted.
+// when only one root is mounted. In direct mode the SSD is left out — it takes
+// no part in the copy — and the arrow spells out where files are going.
 func (m *Model) renderDeviceHeader() string {
 	if m.status == nil {
 		return ""
 	}
 	r := m.status
-	sep := styleDim.Render(" · ")
-	out := deviceBadge("Camera", r.SourceAvail, r.SourceFree) + sep +
-		dualBadge("SSD", r.SSDPhotosAvail, r.SSDVideosAvail, r.SSDPhotosFree, r.SSDVideosFree)
-	if m.cfg.NASConfigured() {
-		out += sep + dualBadge("NAS", r.NASPhotosAvail, r.NASVideosAvail, r.NASPhotosFree, r.NASVideosFree)
+	parts := []string{deviceBadge("Source", r.SourceAvail, r.SourceFree)}
+	if m.cfg.SSDInUse() {
+		parts = append(parts, dualBadge("SSD", r.SSDPhotosAvail, r.SSDVideosAvail, r.SSDPhotosFree, r.SSDVideosFree))
 	}
-	return out + " "
+	if m.cfg.NASConfigured() {
+		parts = append(parts, dualBadge("NAS", r.NASPhotosAvail, r.NASVideosAvail, r.NASPhotosFree, r.NASVideosFree))
+	}
+	joiner := styleDim.Render(" · ")
+	if m.cfg.DirectToNAS {
+		joiner = styleDim.Render(" → ")
+	}
+	return strings.Join(parts, joiner) + " "
 }
 
 func deviceBadge(name string, avail bool, free int64) string {
@@ -171,7 +177,12 @@ func minFree(a, b int64) int64 {
 }
 
 func (m *Model) renderStatusBar() string {
-	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [g] grid  [y] copy  [v] verify  [?] help  [q] quit"
+	copyHint := "[y] copy"
+	if m.cfg.DirectToNAS {
+		copyHint = "[y] dump → NAS"
+	}
+	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [g] grid  " +
+		copyHint + "  [v] verify  [?] help  [q] quit"
 	if n := len(m.selected); n > 0 {
 		var selBytes int64
 		for _, f := range m.allFiles {
@@ -275,9 +286,13 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 		}
 		f := files[node.fileIdx]
 		onSSD, onNAS := m.fileStatus(f)
-		ssdIcon := styleErr.Render("✗SSD")
-		if onSSD {
-			ssdIcon = styleOK.Render("✓SSD")
+		// The SSD marker is dropped in direct mode — the copy never touches it.
+		ssdIcon := ""
+		if m.cfg.SSDInUse() {
+			ssdIcon = styleErr.Render("✗SSD")
+			if onSSD {
+				ssdIcon = styleOK.Render("✓SSD")
+			}
 		}
 		nasIcon := ""
 		if m.status != nil && m.status.NASAvail() {
@@ -294,6 +309,9 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 		// Shrink the name column on narrow panels so the size and the
 		// SSD/NAS status icons always stay visible.
 		nameW := w - 28
+		if ssdIcon == "" {
+			nameW = w - 24 // no ✓SSD column to leave room for
+		}
 		if nameW > 22 {
 			nameW = 22
 		}
@@ -562,6 +580,8 @@ func (m *Model) renderProgress() string {
 		title = "Phase 2: SSD → NAS"
 	case modeSync:
 		title = "Sync: SSD → NAS"
+	case modeDirect:
+		title = "Direct: Source → NAS (with verification)"
 	case modeVerify:
 		title = "Verifying files…"
 	}
@@ -675,6 +695,10 @@ func (m *Model) renderHelp() string {
 		title    string
 		bindings []binding
 	}
+	copyDesc := "copy — selected files, or everything missing"
+	if m.cfg.DirectToNAS {
+		copyDesc = "dump straight to the NAS (verified, local SSD bypassed)"
+	}
 	sections := []section{
 		{"Navigation", []binding{
 			{"j/k or ↑/↓", "move cursor"},
@@ -687,7 +711,7 @@ func (m *Model) renderHelp() string {
 			{"a", "select/deselect everything in the tab"},
 		}},
 		{"Actions", []binding{
-			{"y", "copy — selected files, or everything missing"},
+			{"y", copyDesc},
 			{"v", "verify checksums (camera vs SSD vs NAS)"},
 		}},
 		{"Grid & preview", []binding{

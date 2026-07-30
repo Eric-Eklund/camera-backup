@@ -5,6 +5,19 @@
 
 source = "/run/media/user/CAMERA-CARD" # Camera / memory card (mount point)
 
+# Additional source devices, tried in order when `source` is not mounted
+# (optional) — e.g. a second card reader or an external SSD. Whichever one is
+# plugged in becomes the source, so one config serves them all.
+#extra_sources = ["/run/media/user/EXT-SSD"]
+
+# Dump straight from the source device to the NAS, skipping the local SSD
+# (optional, default false). With this on, `copy` and the TUI's [y] copy the
+# card or external drive directly to the NAS — always SHA256-verified, since
+# the NAS copy is then the only copy. The `dump` command does the same thing
+# on demand without this setting. Requires nas_photos/nas_videos; the
+# ssd_* keys become optional (and `sync` still works if you keep them).
+#direct_to_nas = false
+
 # Destination roots — one per category. Point photos and videos at the same
 # path to merge them into one tree.
 ssd_photos = "/mnt/ssd/Photos" # Local SSD destination for photos

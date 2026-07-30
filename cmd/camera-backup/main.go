@@ -33,7 +33,11 @@ and a remote NAS — incrementally and with SHA256 verification.
 Typical workflow:
   1. camera-backup status      — see what needs copying
   2. camera-backup copy        — copy camera→SSD, pause, then SSD→NAS
-  3. camera-backup status      — final check before formatting cards in-camera`,
+  3. camera-backup status      — final check before formatting cards in-camera
+
+To skip the local SSD entirely and dump a card or external drive straight to
+the NAS, run "camera-backup dump" — or set direct_to_nas = true in config.toml
+to make that the default for "copy" and the TUI.`,
 	}
 
 	root.PersistentFlags().StringVar(&configPath, "config", "", "Path to config.toml (default: next to binary)")
@@ -53,6 +57,7 @@ Typical workflow:
 	root.AddCommand(
 		newStatusCmd(&configPath),
 		newCopyCmd(&configPath),
+		newDumpCmd(&configPath),
 		newSyncCmd(&configPath),
 		newVerifyCmd(&configPath),
 		newTUICmd(&configPath),
@@ -128,6 +133,48 @@ func newStatusCmd(configPath *string) *cobra.Command {
 	}
 }
 
+// newDumpCmd copies straight from the source device to the NAS, skipping the
+// local SSD. Unlike copy it does not depend on direct_to_nas — the setting only
+// decides what copy and the TUI do by default.
+func newDumpCmd(configPath *string) *cobra.Command {
+	var opts syncOptions
+	cmd := &cobra.Command{
+		Use:   "dump",
+		Short: "Copy missing files straight from the card/drive to the NAS (no local SSD)",
+		Long: `Copy missing files straight from the source device to the NAS, bypassing
+the local SSD. Use this when you plug in a memory card or an external drive
+and want the files on the NAS without a local staging copy.
+
+Files land in the same year/month/day layout as a normal backup and are
+SHA256-verified after copying, because the NAS copy is the only copy.
+
+The source device is the first mounted path of source/extra_sources, so one
+config can serve a card reader and an external drive.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger, cleanup, err := initLogger()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			cfg, err := mustLoadConfig(*configPath)
+			if err != nil {
+				return err
+			}
+			if err := opts.resolveOrder(cfg); err != nil {
+				return err
+			}
+			return runDirect(cfg, logger, opts)
+		},
+	}
+	cmd.Flags().BoolVarP(&opts.videosOnly, "videos-only", "v", false, "Only copy video files")
+	cmd.Flags().BoolVarP(&opts.photosOnly, "photos-only", "p", false, "Only copy photo files")
+	cmd.Flags().StringVar(&opts.order, "order", "",
+		"Transfer order: videos-first or size-asc (smallest files first, best on flaky connections; default from nas_sync_order, else videos-first)")
+	cmd.MarkFlagsMutuallyExclusive("videos-only", "photos-only")
+	return cmd
+}
+
 func newCopyCmd(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "copy",
@@ -148,11 +195,29 @@ func newCopyCmd(configPath *string) *cobra.Command {
 	}
 }
 
-// syncOptions controls which categories runSync transfers and in what order.
+// syncOptions controls which categories a NAS transfer covers and in what
+// order. Shared by the sync and dump commands.
 type syncOptions struct {
 	videosOnly bool
 	photosOnly bool
 	order      string // config.OrderVideosFirst or config.OrderSizeAsc
+}
+
+// resolveOrder fills in the configured default order when --order was omitted
+// and rejects an unknown value.
+func (o *syncOptions) resolveOrder(cfg *config.Config) error {
+	if o.order == "" {
+		o.order = cfg.SyncOrder()
+	}
+	if o.order != config.OrderVideosFirst && o.order != config.OrderSizeAsc {
+		return fmt.Errorf("invalid --order %q (valid: %s, %s)", o.order, config.OrderVideosFirst, config.OrderSizeAsc)
+	}
+	return nil
+}
+
+// skipsCategory reports whether cat is filtered out by --videos-only/--photos-only.
+func (o *syncOptions) skipsCategory(cat string) bool {
+	return (o.videosOnly && cat != "videos") || (o.photosOnly && cat != "photos")
 }
 
 func newSyncCmd(configPath *string) *cobra.Command {
@@ -171,11 +236,8 @@ func newSyncCmd(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.order == "" {
-				opts.order = cfg.SyncOrder()
-			}
-			if opts.order != config.OrderVideosFirst && opts.order != config.OrderSizeAsc {
-				return fmt.Errorf("invalid --order %q (valid: %s, %s)", opts.order, config.OrderVideosFirst, config.OrderSizeAsc)
+			if err := opts.resolveOrder(cfg); err != nil {
+				return err
 			}
 			return runSync(cfg, logger, opts)
 		},
@@ -212,10 +274,16 @@ func newVerifyCmd(configPath *string) *cobra.Command {
 }
 
 func runCopy(cfg *config.Config, logger *log.Logger) error {
+	// direct_to_nas replaces the two-phase flow with a single source → NAS pass.
+	if cfg.DirectToNAS {
+		return runDirect(cfg, logger, syncOptions{order: cfg.SyncOrder()})
+	}
+
 	exts := cfg.NormalisedExtensions()
 	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
 
-	sourceAvail := isDir(cfg.Source)
+	source := cfg.ActiveSource()
+	sourceAvail := isDir(source)
 	ssdPhotosAvail := config.RootAvailable(cfg.SSDPhotos)
 	ssdVideosAvail := config.RootAvailable(cfg.SSDVideos)
 
@@ -225,14 +293,14 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 
 	phase1Ran := false
 	if !sourceAvail {
-		ui.Yellow.Printf("  Camera not available at %s — skipping.\n", cfg.Source)
+		ui.Yellow.Printf("  Camera not available at %s — skipping.\n", source)
 		ui.Yellow.Println("  To sync SSD → NAS only, run: camera-backup sync")
 		logger.Println("Phase 1 skipped: camera not available")
 	} else if !ssdPhotosAvail && !ssdVideosAvail {
 		return fmt.Errorf("SSD not accessible at %s or %s", cfg.SSDPhotos, cfg.SSDVideos)
 	} else {
 		phase1Ran = true
-		cameraFiles, err := scan.Walk(cfg.Source, exts)
+		cameraFiles, err := scan.Walk(source, exts)
 		if err != nil {
 			return err
 		}
@@ -300,6 +368,99 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 	return runSync(cfg, logger, syncOptions{order: cfg.SyncOrder()})
 }
 
+// runDirect copies files from the source device straight to the NAS, bypassing
+// the local SSD. It is what the dump command runs, and what copy runs when
+// direct_to_nas is set.
+//
+// Paths are transformed exactly as in Camera→SSD (year/month/day under the
+// category root) so a direct dump and a staged backup produce the same tree,
+// and every file is SHA256-verified: with no SSD in the chain the NAS copy is
+// the only copy. NAS writes are bounded by nas_write_timeout_seconds so a hung
+// mount fails the file instead of the run.
+func runDirect(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
+	exts := cfg.NormalisedExtensions()
+	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
+	source := cfg.ActiveSource()
+
+	ui.Bold.Println("\n  Direct: Source → NAS (local SSD bypassed)")
+	fmt.Println("  ─────────────────────────────────────────")
+	fmt.Printf("  Source: %s\n", source)
+
+	if !isDir(source) {
+		return fmt.Errorf("source not available at %s — insert the card or connect the drive", source)
+	}
+	if !cfg.NASConfigured() {
+		return fmt.Errorf("no NAS configured — set nas_photos and nas_videos in config.toml")
+	}
+	nasPhotosAvail := config.RootAvailable(cfg.NASPhotos)
+	nasVideosAvail := config.RootAvailable(cfg.NASVideos)
+	if !nasPhotosAvail && !nasVideosAvail {
+		return fmt.Errorf("NAS not available at %s or %s — mount the share (or connect the VPN) and re-run",
+			cfg.NASPhotos, cfg.NASVideos)
+	}
+
+	srcFiles, err := scan.Walk(source, exts)
+	if err != nil {
+		return err
+	}
+	srcFiles, unstable := scan.SplitStable(srcFiles, time.Now(), scan.StableAge)
+	if len(unstable) > 0 {
+		ui.Yellow.Printf("  ⚠️  %d file(s) skipped — modified moments ago, possibly still being written. Re-run when the device is idle.\n", len(unstable))
+		logger.Printf("direct: %d file(s) skipped — modtime within %s of scan", len(unstable), scan.StableAge)
+	}
+	photos, videos := scan.SplitByCategory(srcFiles, categoryFn)
+	nasPhotoFiles, nasVideoFiles := scan.WalkDual(cfg.NASPhotos, cfg.NASVideos, exts)
+
+	// Build tasks per category, videos first so large files are prioritised if
+	// the connection drops. A category whose NAS root is unavailable is skipped
+	// with a warning so the other category still gets copied.
+	var tasks []copyop.Task
+	addCategory := func(files []scan.FileInfo, cat string, avail bool, nasFiles []scan.FileInfo) {
+		if opts.skipsCategory(cat) {
+			return
+		}
+		missing := scan.MissingFromDest(files, scan.IndexByRelPath(nasFiles))
+		if len(missing) == 0 {
+			return
+		}
+		if !avail {
+			ui.Yellow.Printf("  ⚠️  %d %s file(s) skipped — NAS %s root not available at %s\n",
+				len(missing), cat, cat, cfg.NASRoot(cat))
+			logger.Printf("direct: %d %s files skipped, root unavailable", len(missing), cat)
+			return
+		}
+		for _, f := range missing {
+			tasks = append(tasks, copyop.Task{Src: f, DstRoot: cfg.NASRoot(cat), DstRelPath: f.DestRelPath()})
+		}
+	}
+	addCategory(videos, "videos", nasVideosAvail, nasVideoFiles)
+	addCategory(photos, "photos", nasPhotosAvail, nasPhotoFiles)
+	if opts.order == config.OrderSizeAsc {
+		copyop.SortBySizeAsc(tasks)
+	}
+
+	if len(tasks) == 0 {
+		ui.Green.Println("\n  NAS is already up to date — nothing to copy.")
+		logger.Println("direct: NAS already up to date")
+		return nil
+	}
+
+	if err := copyop.CheckSpace(tasks); err != nil {
+		return err
+	}
+	ui.Bold.Printf("\n  Copying %d file(s) straight to NAS (verified)...\n", len(tasks))
+	logger.Printf("direct source→NAS: %d files, order=%s", len(tasks), opts.order)
+	errs := copyop.RunBatch(tasks, logger, true, cfg.NASWriteTimeout())
+	fmt.Println()
+	if errs > 0 {
+		ui.Red.Printf("  ❌  %d file(s) failed to copy — do not format the card.\n", errs)
+		ui.Red.Println("  Check the log, fix the issue, and re-run.")
+		return fmt.Errorf("%d file(s) failed during Source → NAS", errs)
+	}
+	ui.Green.Printf("  ✅  %d file(s) copied and verified.\n", len(tasks))
+	return nil
+}
+
 // runSync copies files from SSD that are missing on the NAS.
 // opts filters the batch to one category (videosOnly/photosOnly) and picks the
 // transfer order: videos first by default so they are prioritised if the
@@ -339,10 +500,7 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	// skipped with a warning; duplicates across SSD roots are copied once.
 	var tasks []copyop.Task
 	addCategory := func(files []scan.FileInfo, cat string, avail bool, nasFiles []scan.FileInfo) {
-		if opts.videosOnly && cat != "videos" {
-			return
-		}
-		if opts.photosOnly && cat != "photos" {
+		if opts.skipsCategory(cat) {
 			return
 		}
 		missing := scan.MissingByRelPath(files, scan.IndexByRelPath(nasFiles))

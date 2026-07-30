@@ -46,7 +46,11 @@ func PrintDeviceTable(rows []DeviceRow) {
 
 // SpaceInfo holds how much needs to be copied and how much is free on a destination.
 type SpaceInfo struct {
-	Avail     bool
+	Avail bool
+	// Bypassed marks a destination that takes no part in this run — the local
+	// SSD when direct_to_nas is set. Reported instead of "not available", which
+	// would read as a problem.
+	Bypassed  bool
 	ToBytes   int64
 	FreeBytes int64 // -1 if free space could not be determined
 }
@@ -54,7 +58,7 @@ type SpaceInfo struct {
 func PrintSummary(totalCamera int, cameraBytes int64, missingFromSSD, missingFromNAS int, ssd, nas SpaceInfo, nasAvail bool) {
 	Bold.Println("  Summary")
 	fmt.Println("  " + strings.Repeat("─", 52))
-	fmt.Printf("  Camera files found :  %d  (%s)\n", totalCamera, FormatBytes(cameraBytes))
+	fmt.Printf("  Source files found :  %d  (%s)\n", totalCamera, FormatBytes(cameraBytes))
 
 	printDestLine("SSD", missingFromSSD, ssd)
 
@@ -67,6 +71,10 @@ func PrintSummary(totalCamera int, cameraBytes int64, missingFromSSD, missingFro
 }
 
 func printDestLine(label string, missing int, space SpaceInfo) {
+	if space.Bypassed {
+		Dim.Printf("  %-18s :  bypassed — copying straight to NAS\n", label)
+		return
+	}
 	if !space.Avail {
 		Red.Printf("  %-18s :  not available\n", label)
 		return

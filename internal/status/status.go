@@ -15,6 +15,9 @@ import (
 // SSD and NAS each have two destination roots (photos/videos) which may be
 // the same directory; availability and free space are tracked per root.
 type StatusResult struct {
+	// Source is the source device this scan used — the first mounted entry of
+	// source/extra_sources (config.ActiveSource).
+	Source      string
 	SourceAvail bool
 	SourceFree  int64
 
@@ -78,14 +81,16 @@ func (r *StatusResult) NASRootAvail(category string) bool {
 func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 	exts := cfg.NormalisedExtensions()
 
+	source := cfg.ActiveSource()
 	r := &StatusResult{
-		SourceAvail:    isDir(cfg.Source),
+		Source:         source,
+		SourceAvail:    isDir(source),
 		SSDPhotosAvail: config.RootAvailable(cfg.SSDPhotos),
 		SSDVideosAvail: config.RootAvailable(cfg.SSDVideos),
 		NASPhotosAvail: config.RootAvailable(cfg.NASPhotos),
 		NASVideosAvail: config.RootAvailable(cfg.NASVideos),
 	}
-	r.SourceFree = freeOrNeg(cfg.Source, r.SourceAvail)
+	r.SourceFree = freeOrNeg(source, r.SourceAvail)
 	r.SSDPhotosFree = freeOrNeg(cfg.SSDPhotos, r.SSDPhotosAvail)
 	r.SSDVideosFree = freeOrNeg(cfg.SSDVideos, r.SSDVideosAvail)
 	r.NASPhotosFree = freeOrNeg(cfg.NASPhotos, r.NASPhotosAvail)
@@ -93,7 +98,7 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 
 	if r.SourceAvail {
 		var err error
-		r.CameraFiles, err = scan.Walk(cfg.Source, exts)
+		r.CameraFiles, err = scan.Walk(source, exts)
 		if err != nil {
 			return nil, err
 		}
@@ -129,14 +134,19 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 
 	if r.SourceAvail {
 		camPhotos, camVideos := scan.SplitByCategory(r.CameraFiles, categoryFn)
-		r.MissingOnSSD = append(
-			scan.MissingFromDest(camPhotos, ssdPhotoIdx),
-			scan.MissingFromDest(camVideos, ssdVideoIdx)...)
+		// In direct mode the SSD is out of the picture; with no SSD configured
+		// at all every file would also look "missing from SSD".
+		if cfg.SSDInUse() {
+			r.MissingOnSSD = append(
+				scan.MissingFromDest(camPhotos, ssdPhotoIdx),
+				scan.MissingFromDest(camVideos, ssdVideoIdx)...)
+		}
 		r.MissingOnNAS = append(
 			scan.MissingFromDest(camPhotos, nasPhotoIdx),
 			scan.MissingFromDest(camVideos, nasVideoIdx)...)
-	} else if r.SSDAvail() {
+	} else if r.SSDAvail() && cfg.SSDInUse() {
 		// No camera: compute what SSD files are missing on NAS, per category.
+		// Skipped in direct mode — there the SSD is not a copy source.
 		ssdPhotos, ssdVideos := scan.SplitByCategory(r.SSDFiles, categoryFn)
 		r.MissingOnNAS = append(
 			scan.MissingByRelPath(ssdPhotos, nasPhotoIdx),
@@ -162,12 +172,18 @@ func Run(cfg *config.Config, logger *log.Logger) error {
 		return err
 	}
 
-	rows := []ui.DeviceRow{
-		{Name: "Camera      " + cfg.Source, Available: r.SourceAvail, FreeBytes: r.SourceFree},
+	if cfg.DirectToNAS {
+		ui.Bold.Println("\n  Mode: direct — source → NAS (local SSD bypassed)")
 	}
-	if cfg.SSDMerged() {
+
+	rows := []ui.DeviceRow{
+		{Name: "Source      " + r.Source, Available: r.SourceAvail, FreeBytes: r.SourceFree},
+	}
+	switch {
+	case !cfg.SSDConfigured(): // nothing to show — no SSD roots configured
+	case cfg.SSDMerged():
 		rows = append(rows, ui.DeviceRow{Name: "SSD         " + cfg.SSDPhotos, Available: r.SSDPhotosAvail, FreeBytes: r.SSDPhotosFree})
-	} else {
+	default:
 		rows = append(rows,
 			ui.DeviceRow{Name: "SSD photos  " + cfg.SSDPhotos, Available: r.SSDPhotosAvail, FreeBytes: r.SSDPhotosFree},
 			ui.DeviceRow{Name: "SSD videos  " + cfg.SSDVideos, Available: r.SSDVideosAvail, FreeBytes: r.SSDVideosFree},
@@ -186,11 +202,16 @@ func Run(cfg *config.Config, logger *log.Logger) error {
 	ui.PrintDeviceTable(rows)
 
 	if !r.SourceAvail {
-		ui.Yellow.Println("  Camera not available — cannot scan files.")
+		ui.Yellow.Printf("  Source not available at %s — cannot scan files.\n", r.Source)
 		return nil
 	}
 
-	ssdInfo := ui.SpaceInfo{Avail: r.SSDAvail(), ToBytes: totalSize(r.MissingOnSSD), FreeBytes: minFree(r.SSDPhotosFree, r.SSDVideosFree)}
+	ssdInfo := ui.SpaceInfo{
+		Avail:     r.SSDAvail(),
+		Bypassed:  !cfg.SSDInUse(),
+		ToBytes:   totalSize(r.MissingOnSSD),
+		FreeBytes: minFree(r.SSDPhotosFree, r.SSDVideosFree),
+	}
 	nasInfo := ui.SpaceInfo{Avail: r.NASAvail(), ToBytes: totalSize(r.MissingOnNAS), FreeBytes: minFree(r.NASPhotosFree, r.NASVideosFree)}
 
 	ui.PrintSummary(len(r.CameraFiles), totalSize(r.CameraFiles), len(r.MissingOnSSD), len(r.MissingOnNAS), ssdInfo, nasInfo, r.NASAvail())

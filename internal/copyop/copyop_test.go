@@ -183,6 +183,56 @@ func TestCopy_MissingSource(t *testing.T) {
 	}
 }
 
+// ── CopyAndVerify ─────────────────────────────────────────────────────────────
+
+// A direct source→NAS dump copies with verification *and* a write timeout —
+// the timeout must not disturb a healthy copy.
+func TestCopyAndVerify_WithWriteTimeout(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	logger := log.New(io.Discard, "", 0)
+
+	content := []byte("verified straight to the NAS")
+	srcFile := filepath.Join(src, "DSC_0001.NEF")
+	modtime := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	os.WriteFile(srcFile, content, 0644)
+	os.Chtimes(srcFile, modtime, modtime)
+
+	task := Task{
+		Src:        scan.FileInfo{AbsPath: srcFile, RelPath: "DCIM/DSC_0001.NEF", Size: int64(len(content)), ModTime: modtime},
+		DstRoot:    dst,
+		DstRelPath: "2026/2026-03/2026-03-25/DSC_0001.NEF",
+	}
+	if err := CopyAndVerify(task, logger, time.Minute); err != nil {
+		t.Fatalf("CopyAndVerify: %v", err)
+	}
+
+	dstFile := filepath.Join(dst, "2026/2026-03/2026-03-25/DSC_0001.NEF")
+	got, _ := os.ReadFile(dstFile)
+	if string(got) != string(content) {
+		t.Error("destination content does not match source")
+	}
+	fi, err := os.Stat(dstFile)
+	if err != nil {
+		t.Fatalf("stat destination: %v", err)
+	}
+	if fi.ModTime().Unix() != modtime.Unix() {
+		t.Errorf("modtime = %v, want %v", fi.ModTime(), modtime)
+	}
+}
+
+func TestCopyAndVerify_MissingSource(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	task := Task{
+		Src:        scan.FileInfo{AbsPath: "/nonexistent/DSC_0001.NEF", RelPath: "DSC_0001.NEF", Size: 100, ModTime: time.Now()},
+		DstRoot:    t.TempDir(),
+		DstRelPath: "2026-03-25/DSC_0001.NEF",
+	}
+	if err := CopyAndVerify(task, logger, time.Minute); err == nil {
+		t.Fatal("expected error for missing source")
+	}
+}
+
 // ── copyStream write timeout ──────────────────────────────────────────────────
 
 // blockingWriteCloser blocks every Write until release is closed — a stand-in
@@ -190,6 +240,7 @@ func TestCopy_MissingSource(t *testing.T) {
 type blockingWriteCloser struct{ release chan struct{} }
 
 func (b *blockingWriteCloser) Write(p []byte) (int, error) { <-b.release; return len(p), nil }
+func (b *blockingWriteCloser) Sync() error                 { return nil }
 func (b *blockingWriteCloser) Close() error                { return nil }
 
 func TestCopyStream_HangingWriterTimesOut(t *testing.T) {
@@ -197,7 +248,7 @@ func TestCopyStream_HangingWriterTimesOut(t *testing.T) {
 	abandoned := make(chan struct{})
 
 	err := copyStream(w, strings.NewReader("stuck data"), io.Discard,
-		"VIDEO001.MOV", "/nas/VIDEO001.MOV", 50*time.Millisecond, func() { close(abandoned) })
+		"VIDEO001.MOV", "/nas/VIDEO001.MOV", false, 50*time.Millisecond, func() { close(abandoned) })
 	if !errors.Is(err, errWriteTimeout) {
 		t.Fatalf("err = %v, want errWriteTimeout", err)
 	}
@@ -219,16 +270,59 @@ func TestCopyStream_HangingWriterTimesOut(t *testing.T) {
 	}
 }
 
+// A verified copy to the NAS (the direct dump path) must time out on a hung
+// mount too — the verify flag used to disable the timeout entirely.
+func TestCopyStream_HangingSyncedWriteTimesOut(t *testing.T) {
+	w := &blockingWriteCloser{release: make(chan struct{})}
+	abandoned := make(chan struct{})
+
+	err := copyStream(w, strings.NewReader("stuck verified data"), io.Discard,
+		"DSC_0001.NEF", "/nas/DSC_0001.NEF", true, 50*time.Millisecond, func() { close(abandoned) })
+	if !errors.Is(err, errWriteTimeout) {
+		t.Fatalf("err = %v, want errWriteTimeout", err)
+	}
+
+	close(w.release)
+	select {
+	case <-abandoned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("onAbandoned was not called after the stalled write returned")
+	}
+}
+
+// A synced copy must still report a failing Sync rather than claiming success.
+func TestCopyStream_SyncErrorFails(t *testing.T) {
+	w := &syncFailWriteCloser{}
+	err := copyStream(w, strings.NewReader("data"), io.Discard,
+		"DSC_0001.NEF", "/nas/DSC_0001.NEF", true, 0,
+		func() { t.Error("onAbandoned called for a copy that did not time out") })
+	if err == nil || !strings.Contains(err.Error(), "sync") {
+		t.Fatalf("err = %v, want a sync error", err)
+	}
+	if !w.closed {
+		t.Error("destination was not closed after the sync error")
+	}
+}
+
+// syncFailWriteCloser accepts writes but fails to flush, like a full or
+// disconnected destination filesystem.
+type syncFailWriteCloser struct{ closed bool }
+
+func (s *syncFailWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (s *syncFailWriteCloser) Sync() error                 { return errors.New("no space left on device") }
+func (s *syncFailWriteCloser) Close() error                { s.closed = true; return nil }
+
 // slowWriteCloser delays each Write but always completes.
 type slowWriteCloser struct{ delay time.Duration }
 
 func (s *slowWriteCloser) Write(p []byte) (int, error) { time.Sleep(s.delay); return len(p), nil }
+func (s *slowWriteCloser) Sync() error                 { return nil }
 func (s *slowWriteCloser) Close() error                { return nil }
 
 func TestCopyStream_SlowWriterWithinTimeout(t *testing.T) {
 	w := &slowWriteCloser{delay: time.Millisecond}
 	err := copyStream(w, strings.NewReader("slow but steady"), io.Discard,
-		"DSC_0001.NEF", "/nas/DSC_0001.NEF", 5*time.Second,
+		"DSC_0001.NEF", "/nas/DSC_0001.NEF", false, 5*time.Second,
 		func() { t.Error("onAbandoned called for a copy that finished in time") })
 	if err != nil {
 		t.Fatalf("copyStream: %v", err)
@@ -238,7 +332,7 @@ func TestCopyStream_SlowWriterWithinTimeout(t *testing.T) {
 func TestCopyStream_NoTimeoutWaitsForever(t *testing.T) {
 	w := &slowWriteCloser{delay: time.Millisecond}
 	err := copyStream(w, strings.NewReader("no deadline"), io.Discard,
-		"DSC_0001.NEF", "/nas/DSC_0001.NEF", 0,
+		"DSC_0001.NEF", "/nas/DSC_0001.NEF", false, 0,
 		func() { t.Error("onAbandoned called with timeout disabled") })
 	if err != nil {
 		t.Fatalf("copyStream: %v", err)
