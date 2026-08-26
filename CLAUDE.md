@@ -244,6 +244,26 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 
 ### Key invariants
 
+**The program never deletes or overwrites a file the user put there.** Not the
+card, not the SSD, not the NAS — regardless of how well the deletion could be
+justified. This is the invariant the whole tool rests on, and it holds without
+exception, because a rule with an exception is one nobody can rely on without
+reading the source first.
+
+The only files this program may remove or overwrite are its own:
+
+- `config.toml`, rewritten by the settings screen (temp file + atomic rename)
+- its log files, one new timestamped file per run
+- a destination file it created **itself** in the same operation, removed when
+  that copy failed, timed out, or did not match its source hash. `safeCreate`
+  opens with `O_EXCL`, so such a path can never name a pre-existing file
+
+That is the complete list. A feature that would delete user files does not
+belong in this program, however carefully it verifies first — clearing the
+staging SSD is the user's job, done by hand. Tooling may *report* what is
+safely copied elsewhere; it may not act on that report. (This was proposed once
+as a `prune` command, built, and rejected for exactly this reason.)
+
 - Source files are never modified or deleted
 - Destination files are created with `O_EXCL` — never overwritten
 - Destination modtime is set to source modtime
