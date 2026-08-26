@@ -50,6 +50,7 @@ Seven subcommands (Cobra CLI):
 |---|---|
 | `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` + `runDirect()` orchestration, logging init |
 | `internal/config` | TOML loading + `Validate()` + `Save()` (comment-preserving write-back), extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SetSourceOverride()`, `SSDInUse()` |
+| `internal/progress` | `--progress-json`: a state document for the batch in flight, replaced atomically while it runs |
 | `internal/devices` | Linux mounted-device discovery (`/proc/self/mountinfo` + `/sys/class/block`) for the source picker |
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
@@ -277,6 +278,28 @@ as a `prune` command, built, and rejected for exactly this reason.)
 - Destination modtime is set to source modtime
 - All extension and path comparisons are lowercased
 - Free disk space is validated before any copy phase starts (`copyop.CheckSpace`, shared by CLI and TUI; groups roots by filesystem so a shared disk isn't double-counted)
+
+### Publishing a running copy
+
+`--progress-json` lets something outside the process follow a copy, and the
+reasons behind its shape are worth keeping:
+
+- **State, not events.** A widget wants to know how far along the copy is, not
+  to replay how it got there. One small document, replaced as the batch runs.
+- **`bytes.done` includes the file in flight.** Counting only finished files
+  leaves the bar frozen through a 40 GB video, which is the case a bar exists
+  for. The same figure drives the speed, so both agree.
+- **Written atomically** (temp file + rename): a reader polling the path either
+  parses the previous document or the new one, never half of either.
+- **Writes are throttled to `writeInterval`, except when a file enters or
+  leaves the batch.** Those transitions are what a reader is waiting for, and
+  there are only as many of them as there are files.
+- **`running`, `pid` and `updated_at` together** are how a reader tells a live
+  copy from the document a killed process left behind — nothing rewrites it.
+- The plumbing is `copyop.RunBatchObserved`, which is `RunBatch` with a sink
+  for the byte counts the terminal bars already receive. `setup()` tees the
+  progress writer, so the copy path itself is unchanged and a nil observer
+  makes it exactly `RunBatch`.
 
 ### TUI specifics
 

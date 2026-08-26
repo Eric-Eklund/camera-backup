@@ -56,9 +56,11 @@ type Task struct {
 	DstRelPath string // e.g. "2026/2026-03/2026-03-24/DSC_0001.NEF"
 }
 
-// setup opens source and destination and returns a progress writer.
+// setup opens source and destination and returns the terminal progress writer
+// plus the writer the copy should report bytes to — the same thing unless an
+// observer is watching, in which case both are fed.
 // On error the destination file is cleaned up by the caller.
-func setup(t Task) (src, dst *os.File, dstPath string, pw *ui.ProgressWriter, err error) {
+func setup(t Task, extra io.Writer) (src, dst *os.File, dstPath string, pw *ui.ProgressWriter, w io.Writer, err error) {
 	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
 	if err = os.MkdirAll(filepath.Dir(intendedPath), 0755); err != nil {
 		err = fmt.Errorf("mkdir %q: %w", filepath.Dir(intendedPath), err)
@@ -77,6 +79,10 @@ func setup(t Task) (src, dst *os.File, dstPath string, pw *ui.ProgressWriter, er
 		return
 	}
 	pw = ui.NewProgressWriter(filepath.Base(dstPath), t.Src.Size, os.Stdout)
+	w = pw
+	if extra != nil {
+		w = io.MultiWriter(pw, extra)
+	}
 	return
 }
 
@@ -97,8 +103,14 @@ func logCollision(t Task, intendedPath, dstPath string, logger *log.Logger) {
 // destinations, where a hung mount would otherwise block forever, and 0 for
 // local disks; <= 0 disables it.
 func CopyAndVerify(t Task, logger *log.Logger, writeTimeout time.Duration) error {
+	return copyVerified(t, logger, writeTimeout, nil)
+}
+
+// copyVerified is CopyAndVerify with an optional second writer receiving the
+// same byte counts as the terminal progress bar.
+func copyVerified(t Task, logger *log.Logger, writeTimeout time.Duration, extra io.Writer) error {
 	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
-	src, dst, dstPath, pw, err := setup(t)
+	src, dst, dstPath, pw, w, err := setup(t, extra)
 	if err != nil {
 		return err
 	}
@@ -106,7 +118,7 @@ func CopyAndVerify(t Task, logger *log.Logger, writeTimeout time.Duration) error
 	// Close makes its next read fail so it winds down instead of copying on.
 	defer src.Close()
 
-	err = copyStream(dst, src, pw, t.Src.RelPath, dstPath, true, writeTimeout, func() { os.Remove(dstPath) })
+	err = copyStream(dst, src, w, t.Src.RelPath, dstPath, true, writeTimeout, func() { os.Remove(dstPath) })
 	pw.Done()
 	if errors.Is(err, errWriteTimeout) {
 		return nasTimeoutError(writeTimeout, t.Src.RelPath, dstPath)
@@ -235,8 +247,14 @@ func nasTimeoutError(writeTimeout time.Duration, relPath, dstPath string) error 
 // A writeTimeout > 0 bounds how long each file may take, so a hung network
 // mount fails the file instead of blocking the whole batch; <= 0 disables it.
 func Copy(t Task, logger *log.Logger, writeTimeout time.Duration) error {
+	return copyFast(t, logger, writeTimeout, nil)
+}
+
+// copyFast is Copy with an optional second writer receiving the same byte
+// counts as the terminal progress bar.
+func copyFast(t Task, logger *log.Logger, writeTimeout time.Duration, extra io.Writer) error {
 	intendedPath := filepath.Join(t.DstRoot, t.DstRelPath)
-	src, dst, dstPath, pw, err := setup(t)
+	src, dst, dstPath, pw, w, err := setup(t, extra)
 	if err != nil {
 		return err
 	}
@@ -244,7 +262,7 @@ func Copy(t Task, logger *log.Logger, writeTimeout time.Duration) error {
 	// Close makes its next read fail so it winds down instead of copying on.
 	defer src.Close()
 
-	err = copyStream(dst, src, pw, t.Src.RelPath, dstPath, false, writeTimeout, func() { os.Remove(dstPath) })
+	err = copyStream(dst, src, w, t.Src.RelPath, dstPath, false, writeTimeout, func() { os.Remove(dstPath) })
 	pw.Done()
 	if errors.Is(err, errWriteTimeout) {
 		return nasTimeoutError(writeTimeout, t.Src.RelPath, dstPath)
@@ -448,20 +466,55 @@ loop:
 // file instead of the batch — including verified direct dumps; pass 0 for
 // local destinations such as Camera→SSD.
 func RunBatch(tasks []Task, logger *log.Logger, verify bool, nasWriteTimeout time.Duration) int {
-	copyFn := func(t Task, logger *log.Logger) error { return Copy(t, logger, nasWriteTimeout) }
-	if verify {
-		copyFn = func(t Task, logger *log.Logger) error { return CopyAndVerify(t, logger, nasWriteTimeout) }
-	}
+	return RunBatchObserved(tasks, logger, verify, nasWriteTimeout, nil)
+}
+
+// RunBatchObserved is RunBatch with a sink for the progress the terminal bars
+// already show, so something outside this process can follow along. observe is
+// called as bytes land and once more when each file finishes; it must not
+// block, since the copy waits on it. A nil observe makes this exactly
+// RunBatch.
+func RunBatchObserved(tasks []Task, logger *log.Logger, verify bool, nasWriteTimeout time.Duration, observe func(FileProgress)) int {
 	errCount := 0
 	for i, t := range tasks {
 		fmt.Printf("\n  [%d/%d] %s\n", i+1, len(tasks), t.DstRelPath)
-		if err := copyFn(t, logger); err != nil {
+
+		var extra io.Writer
+		if observe != nil {
+			extra = &observeWriter{observe: observe, relPath: t.Src.RelPath, size: t.Src.Size}
+		}
+
+		var err error
+		if verify {
+			err = copyVerified(t, logger, nasWriteTimeout, extra)
+		} else {
+			err = copyFast(t, logger, nasWriteTimeout, extra)
+		}
+		if err != nil {
 			ui.Red.Printf("  ERROR: %v\n", err)
 			logger.Printf("ERROR  %v", err)
 			errCount++
 		}
+		if observe != nil {
+			observe(FileProgress{RelPath: t.Src.RelPath, Written: t.Src.Size, Size: t.Src.Size, Done: true, Err: err})
+		}
 	}
 	return errCount
+}
+
+// observeWriter turns the bytes handed to the progress bar into FileProgress
+// snapshots. It writes nothing anywhere — it only counts.
+type observeWriter struct {
+	observe func(FileProgress)
+	relPath string
+	size    int64
+	written int64
+}
+
+func (w *observeWriter) Write(p []byte) (int, error) {
+	w.written += int64(len(p))
+	w.observe(FileProgress{RelPath: w.relPath, Written: w.written, Size: w.size})
+	return len(p), nil
 }
 
 // CheckSpace returns an error if any destination filesystem lacks free space

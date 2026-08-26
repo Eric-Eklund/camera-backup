@@ -15,6 +15,7 @@ import (
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
 	"github.com/Eric-Eklund/camera-backup/internal/devices"
+	"github.com/Eric-Eklund/camera-backup/internal/progress"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
 	"github.com/Eric-Eklund/camera-backup/internal/tui"
@@ -173,12 +174,14 @@ config can serve a card reader and an external drive.`,
 	cmd.Flags().BoolVarP(&opts.photosOnly, "photos-only", "p", false, "Only copy photo files")
 	cmd.Flags().StringVar(&opts.order, "order", "",
 		"Transfer order: videos-first or size-asc (smallest files first, best on flaky connections; default from nas_sync_order, else videos-first)")
+	cmd.Flags().StringVar(&opts.progressPath, "progress-json", "", "Publish the running batch's progress to this file as JSON, for a status bar or a script")
 	cmd.MarkFlagsMutuallyExclusive("videos-only", "photos-only")
 	return cmd
 }
 
 func newCopyCmd(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var opts syncOptions
+	cmd := &cobra.Command{
 		Use:   "copy",
 		Short: "Copy missing files camera→SSD, then (optionally) SSD→NAS",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -192,9 +195,11 @@ func newCopyCmd(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runCopy(cfg, logger)
+			return runCopy(cfg, logger, opts)
 		},
 	}
+	cmd.Flags().StringVar(&opts.progressPath, "progress-json", "", "Publish the running batch's progress to this file as JSON, for a status bar or a script")
+	return cmd
 }
 
 // syncOptions controls which categories a NAS transfer covers and in what
@@ -203,6 +208,9 @@ type syncOptions struct {
 	videosOnly bool
 	photosOnly bool
 	order      string // config.OrderVideosFirst or config.OrderSizeAsc
+	// progressPath is where --progress-json publishes the state of the running
+	// batch; empty means nothing is published.
+	progressPath string
 }
 
 // resolveOrder fills in the configured default order when --order was omitted
@@ -248,6 +256,7 @@ func newSyncCmd(configPath *string) *cobra.Command {
 	cmd.Flags().BoolVarP(&opts.photosOnly, "photos-only", "p", false, "Only sync photo files to NAS")
 	cmd.Flags().StringVar(&opts.order, "order", "",
 		"Transfer order: videos-first or size-asc (smallest files first, best on flaky connections; default from nas_sync_order, else videos-first)")
+	cmd.Flags().StringVar(&opts.progressPath, "progress-json", "", "Publish the running batch's progress to this file as JSON, for a status bar or a script")
 	cmd.MarkFlagsMutuallyExclusive("videos-only", "photos-only")
 	return cmd
 }
@@ -275,10 +284,39 @@ func newVerifyCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func runCopy(cfg *config.Config, logger *log.Logger) error {
+// observeTo opens the progress state file for a batch, returning the observer
+// to hand to copyop and a function that finishes the document. Both are safe
+// to use when no --progress-json path was given: the observer is then nil,
+// which turns the batch back into a plain RunBatch.
+//
+// A failure to publish is reported and otherwise ignored — a status bar that
+// cannot be fed is no reason to stop a backup.
+func observeTo(path, phase string, tasks []copyop.Task, logger *log.Logger) (func(copyop.FileProgress), func()) {
+	if path == "" {
+		return nil, func() {}
+	}
+	var total int64
+	for _, t := range tasks {
+		total += t.Src.Size
+	}
+	w, err := progress.New(path, phase, len(tasks), total)
+	if err != nil {
+		ui.Yellow.Printf("  ⚠️  cannot write progress to %s: %v\n", path, err)
+		logger.Printf("progress: %v", err)
+		return nil, func() {}
+	}
+	logger.Printf("progress: publishing %s to %s", phase, path)
+	return w.Observe, func() {
+		if err := w.Close(); err != nil {
+			logger.Printf("progress: %v", err)
+		}
+	}
+}
+
+func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	// direct_to_nas replaces the two-phase flow with a single source → NAS pass.
 	if cfg.DirectToNAS {
-		return runDirect(cfg, logger, syncOptions{order: cfg.SyncOrder()})
+		return runDirect(cfg, logger, syncOptions{order: cfg.SyncOrder(), progressPath: opts.progressPath})
 	}
 
 	exts := cfg.NormalisedExtensions()
@@ -342,7 +380,9 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 				return err
 			}
 			ui.Bold.Printf("\n  Copying %d file(s) to SSD...\n", len(tasks))
-			errs := copyop.RunBatch(tasks, logger, true, 0)
+			observe, finish := observeTo(opts.progressPath, "camera→ssd", tasks, logger)
+			errs := copyop.RunBatchObserved(tasks, logger, true, 0, observe)
+			finish()
 			fmt.Println()
 			if errs > 0 {
 				ui.Red.Printf("  ❌  %d file(s) failed to copy — do not disconnect the camera.\n", errs)
@@ -367,7 +407,7 @@ func runCopy(cfg *config.Config, logger *log.Logger) error {
 	ui.PrintSeparator()
 
 	// ── Phase 2: SSD → NAS ────────────────────────────────────────────────────
-	return runSync(cfg, logger, syncOptions{order: cfg.SyncOrder()})
+	return runSync(cfg, logger, syncOptions{order: cfg.SyncOrder(), progressPath: opts.progressPath})
 }
 
 // runDirect copies files from the source device straight to the NAS, bypassing
@@ -452,7 +492,9 @@ func runDirect(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	}
 	ui.Bold.Printf("\n  Copying %d file(s) straight to NAS (verified)...\n", len(tasks))
 	logger.Printf("direct source→NAS: %d files, order=%s", len(tasks), opts.order)
-	errs := copyop.RunBatch(tasks, logger, true, cfg.NASWriteTimeout())
+	observe, finish := observeTo(opts.progressPath, "source→nas", tasks, logger)
+	errs := copyop.RunBatchObserved(tasks, logger, true, cfg.NASWriteTimeout(), observe)
+	finish()
 	fmt.Println()
 	if errs > 0 {
 		ui.Red.Printf("  ❌  %d file(s) failed to copy — do not format the card.\n", errs)
@@ -554,7 +596,9 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 		ui.Bold.Printf("\n  Copying %d file(s) to NAS (videos first)...\n", len(tasks))
 		logger.Println("SSD → NAS")
 	}
-	errs := copyop.RunBatch(tasks, logger, false, cfg.NASWriteTimeout())
+	observe, finish := observeTo(opts.progressPath, "ssd→nas", tasks, logger)
+	errs := copyop.RunBatchObserved(tasks, logger, false, cfg.NASWriteTimeout(), observe)
+	finish()
 	fmt.Println()
 	if errs > 0 {
 		ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
