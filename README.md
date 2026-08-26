@@ -37,7 +37,10 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
 
 ## Safety guarantees
 
-- Source files are **never deleted** by this tool
+- **No file you put there is ever deleted or overwritten** — not on the card,
+  not on the SSD, not on the NAS. The only files this program removes or
+  replaces are its own: `config.toml`, its logs, and a copy it was in the
+  middle of writing when something went wrong
 - Source files are opened **read-only**
 - Destination files are **never overwritten** — if a filename already exists, the new file is saved with a `_1`, `_2`, … suffix and a warning is printed
 - Memory cards are always formatted manually in-camera
