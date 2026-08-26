@@ -117,9 +117,18 @@ func mustLoadConfig(configPath string) (*config.Config, error) {
 }
 
 func newStatusCmd(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show device availability and file sync status",
+		Long: `Scan the source device and both destinations and report what is missing where.
+
+With --json the same scan is written to stdout as a single JSON object instead
+of a table, for a status bar, a cron job or anything else that would otherwise
+have to parse the human output. A count that this run did not work out — what
+is missing on a bypassed SSD, or anything at all with no device mounted — is
+null rather than zero, so "nothing is missing" cannot be confused with "this
+was never compared".`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger, cleanup, err := initLogger()
 			if err != nil {
@@ -131,9 +140,18 @@ func newStatusCmd(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return status.Run(cfg, logger)
+			if !asJSON {
+				return status.Run(cfg, logger)
+			}
+			r, err := status.Compute(cfg, logger)
+			if err != nil {
+				return err
+			}
+			return status.WriteJSON(cfg, r, cmd.OutOrStdout(), time.Now())
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Write the scan to stdout as JSON")
+	return cmd
 }
 
 // newDumpCmd copies straight from the source device to the NAS, skipping the

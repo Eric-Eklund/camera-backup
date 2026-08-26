@@ -82,6 +82,52 @@ that both number a frame `DSC_0001` are never confused with each other. Use
 
 If a destination is not connected it shows as `not available` in red.
 
+#### `--json`
+
+The same scan as a single JSON object on stdout, for a status bar or a cron job:
+
+```bash
+camera-backup status --json
+```
+
+```json
+{
+  "generated_at": "2026-03-25T12:00:00Z",
+  "mode": "staged",
+  "compared": "source",
+  "source":  { "path": "/run/media/eric/CAMERA-CARD", "available": true, "free_bytes": 48318382080 },
+  "ssd":     { "configured": true, "in_use": true, "merged": false, "photos": {...}, "videos": {...} },
+  "nas":     { "configured": true, "in_use": true, "merged": false, "photos": {...}, "videos": {...} },
+  "counts":  { "source_files": 412, "missing_on_ssd": 0, "missing_on_nas": 118, "unstable": 0 },
+  "bytes":   { "source_files": 51539607552, "to_ssd": 0, "to_nas": 41234567890 }
+}
+```
+
+A count this run did not work out is **null**, never zero: `missing_on_ssd` is
+null in direct mode (the SSD is bypassed) and with no device mounted at all.
+`compared` says what the numbers describe — `source` when a card was read,
+`ssd` when there was none and the SSD stood in for it (what `sync` would copy),
+`none` when nothing could be compared. A panel that treats null as zero will
+report a backup as complete when nothing was ever checked.
+
+The field names are a contract, pinned by a test.
+
+A waybar module is then a one-liner:
+
+```jsonc
+// ~/.config/waybar/config
+"custom/backup": {
+  "exec": "camera-backup status --json | jq -c '{text: (if .counts.missing_on_nas == null then \"?\" else \"\(.counts.missing_on_nas) → NAS\" end), class: (if .nas.photos.available then \"ok\" else \"offline\" end)}'",
+  "return-type": "json",
+  "interval": 60
+}
+```
+
+Note that this is a snapshot: it scans and exits. Polling it while a copy is
+running starts a second scan of the same devices — safe, since everything is
+read read-only, but slow over a NAS share. To follow a copy as it runs, use
+[`--progress-json`](#--progress-json-copy-sync-dump) instead.
+
 ### `camera-backup copy`
 
 Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verification after each file (SSD is the source of truth). Phase 2 copies SSD → NAS quickly without per-file verification — run `verify` afterwards to confirm integrity.
@@ -201,7 +247,7 @@ camera-backup copy --progress-json /run/user/1000/camera-backup.json
   tell that apart from a live copy.
 
 Scanning the devices to ask what is *left* is a different question, answered by
-`camera-backup status` without a copy running.
+`camera-backup status --json` without a copy running.
 
 ### `camera-backup verify`
 
