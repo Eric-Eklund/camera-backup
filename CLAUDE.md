@@ -287,6 +287,10 @@ waybar module, a cron job, a home automation sensor — so two rules hold:
 - **Field names are a contract.** Renaming one silently breaks somebody's
   panel; `TestReport_Schema` makes that a deliberate act rather than a
   refactor.
+`status --json` skips the log file that every other command opens: it is built
+to be polled, and a timestamped log per invocation would leave a thousand-odd
+files a day.
+
 - **Not-computed is `null`, never `0`.** `Compute` skips comparisons depending
   on what is mounted and whether the SSD is bypassed, and `NewReport` mirrors
   those branches exactly. A consumer that cannot tell "nothing is missing" from
@@ -314,6 +318,13 @@ reasons behind its shape are worth keeping:
   there are only as many of them as there are files.
 - **`running`, `pid` and `updated_at` together** are how a reader tells a live
   copy from the document a killed process left behind — nothing rewrites it.
+- **One document spans both phases of a `copy`.** `runCopy` opens it before the
+  scan and closes it at the end; each phase calls `StartBatch`, which resets
+  the counters and the clock but leaves `running` true. Closing between the
+  phases would tell a reader the backup had finished with SSD→NAS still to
+  come. `sync` and `dump` open and close their own.
+- **A failed file's bytes are not counted.** Its destination is removed, so
+  those bytes are not on the disk; only `files.failed` records it.
 - The plumbing is `copyop.RunBatchObserved`, which is `RunBatch` with a sink
   for the byte counts the terminal bars already receive. `setup()` tees the
   progress writer, so the copy path itself is unchanged and a nil observer

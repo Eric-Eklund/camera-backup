@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 )
@@ -300,5 +302,73 @@ func TestSyncGridPreview_BlocksMode(t *testing.T) {
 	}
 	if len(m.gridPlacements()) == 0 {
 		t.Error("gridPlacements is about geometry and should not depend on the mode")
+	}
+}
+
+// The redraw hook has to sit where thumbCache is filled. It once sat on the
+// full-image message instead, which only ever arrives on the preview screen —
+// so a thumbnail loading while the cursor sat still left the reserved rows
+// blank until the next keypress. Driving Update directly is the point: calling
+// syncInfoPreview by hand is what hid this.
+func TestThumbnailArrival_DrawsWithoutAKeypress(t *testing.T) {
+	m := kittyModel(t)
+	f := m.currentFile()
+	delete(m.thumbCache, f.AbsPath) // not loaded yet
+
+	if cmd := m.syncInfoPreview(); cmd != nil {
+		t.Fatal("something was drawn before the thumbnail arrived")
+	}
+
+	m.Update(thumbnailMsg{file: f.AbsPath, img: image.NewRGBA(image.Rect(0, 0, 160, 120))})
+
+	if m.kittyShown == "" {
+		t.Fatal("the arriving thumbnail was not drawn")
+	}
+	if !strings.Contains(m.kittyShown, f.AbsPath) {
+		t.Errorf("kittyShown = %q, want it to name %q", m.kittyShown, f.AbsPath)
+	}
+}
+
+func TestThumbnailArrival_DrawsIntoTheGrid(t *testing.T) {
+	m := gridModel(t, 4)
+	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
+	for _, f := range files {
+		delete(m.thumbCache, f.AbsPath)
+	}
+	m.syncGridPreview()
+	if m.kittyShown != "" {
+		t.Fatal("something was drawn with no thumbnails loaded")
+	}
+
+	m.Update(thumbnailMsg{file: files[0].AbsPath, img: image.NewRGBA(image.Rect(0, 0, 160, 120))})
+
+	if m.kittyShown == "" {
+		t.Error("the grid did not place the thumbnail that arrived")
+	}
+}
+
+// A resize moves every panel, so whatever is on the graphics layer has to
+// follow — on the grid as much as on the main screen.
+func TestResize_RedrawsTheGrid(t *testing.T) {
+	m := gridModel(t, 6)
+	m.syncGridPreview()
+	before := m.kittyShown
+	if before == "" {
+		t.Fatal("nothing drawn to begin with")
+	}
+
+	m.Update(tea.WindowSizeMsg{Width: m.width + 20, Height: m.height})
+
+	// Forgetting what was drawn is not enough: the images have to be placed
+	// again at their new cells, which only happens if the resize asks the
+	// screen currently showing — the grid — rather than the Info panel.
+	if m.kittyShown == "" {
+		t.Fatal("nothing was redrawn after the resize; the images are gone")
+	}
+	if m.kittyShown == before {
+		t.Error("the signature did not change although the layout did")
+	}
+	if !strings.HasPrefix(m.kittyShown, "grid") {
+		t.Errorf("kittyShown = %q, want the grid's placements", m.kittyShown)
 	}
 }

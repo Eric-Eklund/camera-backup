@@ -245,6 +245,11 @@ camera-backup copy --progress-json /run/user/1000/camera-backup.json
 - When the batch ends, `running` goes false. A process killed mid-copy leaves
   its last document behind — `pid` and `updated_at` are there so a reader can
   tell that apart from a live copy.
+- A `copy` publishes **both** its phases into one document: `phase` goes from
+  `camera→ssd` to `ssd→nas` and the counters restart, but `running` stays true
+  until the whole run is over.
+- Bytes of a file that failed to copy are not counted — its destination was
+  removed, so they are not on the disk. `files.failed` records it instead.
 
 Scanning the devices to ask what is *left* is a different question, answered by
 `camera-backup status --json` without a copy running.

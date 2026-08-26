@@ -195,3 +195,50 @@ func TestNew_UnwritablePathReportsError(t *testing.T) {
 		return // a missing parent is created; only a real failure should error
 	}
 }
+
+// A failed copy leaves nothing on the disk — its destination is removed — so
+// its bytes must not be counted as transferred.
+func TestObserve_FailedFileDoesNotCountBytes(t *testing.T) {
+	w, path := newWriter(t, 2, 300)
+	w.Observe(copyop.FileProgress{RelPath: "A.NEF", Written: 100, Size: 100, Done: true})
+	w.Observe(copyop.FileProgress{RelPath: "B.NEF", Written: 200, Size: 200, Done: true, Err: os.ErrPermission})
+
+	st := read(t, path)
+	if st.Bytes.Done != 100 {
+		t.Errorf("bytes.done = %d, want 100 — the failed file's bytes were counted", st.Bytes.Done)
+	}
+	if st.Files.Done != 2 || st.Files.Failed != 1 {
+		t.Errorf("files = %+v, want 2 finished of which 1 failed", st.Files)
+	}
+}
+
+// A copy is two batches into one document. Between them the counters reset and
+// the phase changes, but a reader must not see the run go finished.
+func TestStartBatch_KeepsTheDocumentRunning(t *testing.T) {
+	w, path := newWriter(t, 2, 200)
+	w.Observe(copyop.FileProgress{RelPath: "A.NEF", Written: 100, Size: 100, Done: true})
+	w.Observe(copyop.FileProgress{RelPath: "B.NEF", Written: 100, Size: 100, Done: true})
+
+	w.StartBatch("ssd→nas", 5, 5000)
+
+	st := read(t, path)
+	if !st.Running {
+		t.Error("running = false between the phases of one copy")
+	}
+	if st.Phase != "ssd→nas" {
+		t.Errorf("phase = %q, want the new one", st.Phase)
+	}
+	if st.Files != (progress.FileCounts{Total: 5}) {
+		t.Errorf("files = %+v, want the counters reset with the new total", st.Files)
+	}
+	if st.Bytes.Done != 0 || st.Bytes.Total != 5000 {
+		t.Errorf("bytes = %+v, want a fresh batch", st.Bytes)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if st := read(t, path); st.Running {
+		t.Error("running = true after the whole copy finished")
+	}
+}

@@ -84,6 +84,9 @@ type Current struct {
 type Writer struct {
 	path  string
 	phase string
+	// start is when the current batch began, so the speed describes the
+	// transfer in progress rather than an average across a pause between
+	// phases.
 	start time.Time
 
 	mu         sync.Mutex
@@ -132,9 +135,12 @@ func (w *Writer) Observe(fp copyop.FileProgress) {
 	if fp.Done {
 		delete(w.inFlight, fp.RelPath)
 		w.done++
-		w.doneBytes += fp.Size
 		if fp.Err != nil {
+			// The destination of a failed copy is removed, so its bytes are
+			// not on the disk and must not be counted as transferred.
 			w.failed++
+		} else {
+			w.doneBytes += fp.Size
 		}
 	} else {
 		w.inFlight[fp.RelPath] = Current{File: fp.RelPath, Written: fp.Written, Size: fp.Size}
@@ -145,6 +151,24 @@ func (w *Writer) Observe(fp copyop.FileProgress) {
 	if force || stale {
 		_ = w.write(false)
 	}
+}
+
+// StartBatch begins a new batch inside the same document: the counters reset
+// and the phase changes, but running stays true.
+//
+// A copy is two batches — camera→SSD, then SSD→NAS — and closing the document
+// between them would tell a reader the backup had finished while half of it
+// was still to come.
+func (w *Writer) StartBatch(phase string, totalFiles int, totalBytes int64) {
+	w.mu.Lock()
+	w.phase = phase
+	w.total = totalFiles
+	w.totalBytes = totalBytes
+	w.done, w.failed, w.doneBytes = 0, 0, 0
+	w.inFlight = map[string]Current{}
+	w.start = time.Now()
+	w.mu.Unlock()
+	_ = w.write(false)
 }
 
 // Close writes the final document, marking the batch finished, and reports the
