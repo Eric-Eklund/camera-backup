@@ -782,6 +782,12 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadThumbsForPreview()
 		}
 
+	case "l", "right":
+		return m.enterNode()
+
+	case "h", "left":
+		return m.leaveNode()
+
 	case "g", "G":
 		// Enter ScreenGrid for current date group.
 		if len(m.visible) == 0 {
@@ -828,6 +834,78 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screenHelp
 	}
 	return m, nil
+}
+
+// enterNode is `l`/`right`: step into what the cursor is on. A collapsed group
+// opens, an open one hands the cursor to its first child, and a file opens its
+// preview — the same motion all the way down the tree.
+func (m *Model) enterNode() (tea.Model, tea.Cmd) {
+	if len(m.visible) == 0 {
+		return m, nil
+	}
+	node := m.visible[m.cursor]
+	if node.level == 3 {
+		m.prevScreen = screenMain
+		m.gridYear, m.gridMonth, m.gridDay = node.year, node.month, node.day
+		m.gridCursor = node.fileIdx
+		m.screen = screenPreview
+		return m, m.loadThumbsForPreview()
+	}
+
+	key := nodeKey(node)
+	if !m.expanded[key] {
+		m.expanded[key] = true
+		m.rebuildVisible()
+		return m, nil
+	}
+	// Already open: the first child is the row right below it, unless the
+	// group turned out to be empty.
+	if m.cursor+1 < len(m.visible) && m.visible[m.cursor+1].level > node.level {
+		m.cursor++
+		return m, m.maybeLoadThumb()
+	}
+	return m, nil
+}
+
+// leaveNode is `h`/`left`: step back out. An open group closes where it
+// stands; anything else — a closed group, or a file — hands the cursor to its
+// parent and closes that, so `h` from deep in a date walks back up one level
+// per press instead of stranding the cursor inside a folder it just left.
+func (m *Model) leaveNode() (tea.Model, tea.Cmd) {
+	if len(m.visible) == 0 {
+		return m, nil
+	}
+	node := m.visible[m.cursor]
+	if node.level < 3 && m.expanded[nodeKey(node)] {
+		m.expanded[nodeKey(node)] = false
+		m.rebuildVisible()
+		return m, nil
+	}
+
+	parent := m.parentIndex(m.cursor)
+	if parent < 0 {
+		return m, nil // a closed year: there is nothing above it
+	}
+	m.expanded[nodeKey(m.visible[parent])] = false
+	m.cursor = parent
+	m.rebuildVisible()
+	return m, m.maybeLoadThumb()
+}
+
+// parentIndex returns the row holding the group that contains idx, or -1 for a
+// top-level row. The visible list is a flattened depth-first walk, so the
+// parent is the nearest row above with one level less.
+func (m *Model) parentIndex(idx int) int {
+	if idx <= 0 || idx >= len(m.visible) {
+		return -1
+	}
+	level := m.visible[idx].level
+	for i := idx - 1; i >= 0; i-- {
+		if m.visible[i].level == level-1 {
+			return i
+		}
+	}
+	return -1
 }
 
 // toggleSelect toggles selection of the focused file, or all files under the

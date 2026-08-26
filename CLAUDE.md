@@ -257,6 +257,7 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 - `q`/`esc` on the progress screen cancels gracefully via `context`: files being copied finish (destination never holds partials), queued tasks don't start, cancelled tasks are not counted as failures; `ctrl+c` is a hard quit
 - The progress screen re-renders twice a second (`progressTickCmd`) so per-file speeds stay live; the overall line shows total throughput and ETA
 - `statusReadyMsg`/`deviceChangedMsg` are ignored outside the loading/main screens so operations are never interrupted visually
+- `h`/`l` (and `←`/`→`) walk the date tree: `enterNode` opens a group or steps to its first child (a file opens the preview), `leaveNode` closes an open group where it stands, and otherwise moves to the parent and closes that — `h` on a file must land on its day, not merely collapse in place. `parentIndex` finds the parent by scanning the flattened list upwards for the nearest lower level
 - Selection (`space`/`a`) filters what `y` copies; empty selection = copy everything. `y` also works from the grid view
 - Grid view scrolls: `gridOffset` + `gridScrollToCursor()` keep the cursor row visible; thumbnails load incrementally for the visible window plus one lookahead row (no fixed cap)
 - `?` opens the help screen (from main and grid); the Files panel title shows the visible row range (`Files 28–53/68`) when the tree overflows
