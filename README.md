@@ -125,8 +125,8 @@ A waybar module is then a one-liner:
 
 Note that this is a snapshot: it scans and exits. Polling it while a copy is
 running starts a second scan of the same devices — safe, since everything is
-read read-only, but slow over a NAS share. Live progress during a copy is a
-different mechanism and does not exist yet.
+read read-only, but slow over a NAS share. To follow a copy as it runs, use
+[`--progress-json`](#--progress-json-copy-sync-dump) instead.
 
 ### `camera-backup copy`
 
@@ -207,6 +207,47 @@ camera-backup sync --order=size-asc  # smallest files first, regardless of type
 Use this when network becomes available after a `copy` run, or to push only videos when bandwidth is limited.
 
 On a flaky or metered connection (e.g. a phone hotspot), small photo files are far more likely to complete before the link drops than multi-gigabyte videos. `--photos-only` pushes just the photos, and `--order=size-asc` sorts the whole batch by file size ascending so the most-likely-to-succeed files go first. Without `--order`, the order comes from the `nas_sync_order` config key (default: videos first, unchanged behaviour).
+
+### `--progress-json` (copy, sync, dump)
+
+While a copy runs, the batch can keep a small state document on disk for
+anything that wants to follow along — a status bar, a script waiting for the
+backup to finish, a phone notification:
+
+```bash
+camera-backup copy --progress-json /run/user/1000/camera-backup.json
+```
+
+```json
+{
+  "running": true,
+  "phase": "camera→ssd",
+  "pid": 3574,
+  "started_at": "2026-03-25T12:00:00Z",
+  "updated_at": "2026-03-25T12:04:31Z",
+  "files":   { "done": 4, "failed": 0, "total": 7 },
+  "bytes":   { "done": 396361728, "total": 424214528 },
+  "current": [ { "file": "DCIM/100NIKON/BIG_0001.MOV", "written": 391118848, "size": 419430400 } ],
+  "bytes_per_second": 138412032,
+  "eta_seconds": 3
+}
+```
+
+- It is a **state** document, not an event log: reading it is `cat` plus a JSON
+  parse, with no history to fold up.
+- `bytes.done` **includes the file being written**, so a bar drawn from
+  `done / total` keeps moving through a 40 GB video instead of standing still
+  until it finishes.
+- `current` is a list because several files can be in flight at once; the CLI
+  writes one at a time.
+- The file is replaced through a temporary file and a rename, so a reader
+  always parses a complete document, never half of one.
+- When the batch ends, `running` goes false. A process killed mid-copy leaves
+  its last document behind — `pid` and `updated_at` are there so a reader can
+  tell that apart from a live copy.
+
+Scanning the devices to ask what is *left* is a different question, answered by
+`camera-backup status --json` without a copy running.
 
 ### `camera-backup verify`
 
@@ -642,6 +683,7 @@ camera-backup/
 ├── internal/
 │   ├── config/              # TOML loading, extension matching, worker counts
 │   ├── devices/             # Mounted-device discovery (mountinfo + sysfs)
+│   ├── progress/            # --progress-json state file for a running copy
 │   ├── scan/                # File scanning and comparison
 │   ├── checksum/            # SHA256 calculation
 │   ├── copyop/              # Copy with progress + verification (serial + parallel)
