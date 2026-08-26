@@ -182,7 +182,7 @@ func (m *Model) renderStatusBar() string {
 	if m.cfg.DirectToNAS {
 		copyHint = "[y] dump → NAS"
 	}
-	hints := "[tab] tabs  [hjkl] move  [enter] expand/preview  [space] select  [g] grid  " +
+	hints := "[tab] tabs  [hjkl] move  [\u005b/\u005d] dates  [z/Z/f] fold  [space] select  [g] grid  " +
 		copyHint + "  [v] verify  [d] devices  [c] settings  [?] help  [q] quit"
 	if n := len(m.selected); n > 0 {
 		var selBytes int64
@@ -977,6 +977,9 @@ func (m *Model) helpBlocks() [][]string {
 			{"l/→", "open group · step into it · preview file"},
 			{"h/←", "close group · step out to the one above"},
 			{"enter", "expand/collapse group · preview file"},
+			{"[ / ]", "previous / next date · [ from a file: top of its day"},
+			{"z · Z", "fold the tree to years · unfold everything"},
+			{"f", "fold everything except the date you are on"},
 			{"tab / shift+tab", "next / previous tab"},
 			{"g", "thumbnail grid for the focused date"},
 		}},

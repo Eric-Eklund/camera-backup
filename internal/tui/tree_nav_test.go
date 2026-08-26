@@ -171,3 +171,92 @@ func TestTreeNav_EmptyTree(t *testing.T) {
 	m.handleMainKey(key("h"))
 	m.handleMainKey(key("l"))
 }
+
+// ] and [ move between date rows instead of stepping over every frame.
+func TestJumpDay(t *testing.T) {
+	m := navModel(t)
+	m.cursor = 0
+
+	m.handleMainKey(key("]"))
+	if lvl, k := rowAt(m); lvl != 2 || k != "2026/2026-03/2026-03-24" {
+		t.Fatalf("after ]: row %d %q, want the first day", lvl, k)
+	}
+	m.handleMainKey(key("]"))
+	if lvl, k := rowAt(m); lvl != 2 || k != "2026/2026-03/2026-03-25" {
+		t.Fatalf("after second ]: row %d %q, want the next day", lvl, k)
+	}
+	// Nothing below the last day: the cursor stays put rather than wrapping.
+	m.handleMainKey(key("]"))
+	if _, k := rowAt(m); k != "2026/2026-03/2026-03-25" {
+		t.Errorf("] past the last day moved to %q", k)
+	}
+}
+
+// [ from inside a day lands on that day's own row — the way back to the top of
+// a long shoot.
+func TestJumpDay_BackwardsFromInsideADay(t *testing.T) {
+	m := navModel(t)
+	for i, n := range m.visible {
+		if n.level == 3 && n.day == "2026-03-25" && n.fileIdx == 1 {
+			m.cursor = i
+		}
+	}
+
+	m.handleMainKey(key("["))
+	if lvl, k := rowAt(m); lvl != 2 || k != "2026/2026-03/2026-03-25" {
+		t.Fatalf("after [: row %d %q, want the day the cursor was inside", lvl, k)
+	}
+	m.handleMainKey(key("["))
+	if _, k := rowAt(m); k != "2026/2026-03/2026-03-24" {
+		t.Errorf("after second [: %q, want the previous day", k)
+	}
+}
+
+// z folds the tree back to the list of years, and leaves the cursor on the
+// year it was in rather than at the top.
+func TestCollapseAll_KeepsPlace(t *testing.T) {
+	m := navModel(t)
+	for i, n := range m.visible {
+		if n.level == 3 {
+			m.cursor = i
+			break
+		}
+	}
+
+	m.handleMainKey(key("z"))
+	if len(m.visible) != 1 {
+		t.Fatalf("%d rows visible, want just the year: %+v", len(m.visible), m.visible)
+	}
+	if lvl, k := rowAt(m); lvl != 0 || k != "2026" {
+		t.Errorf("row %d %q, want the year the file was under", lvl, k)
+	}
+
+	m.handleMainKey(key("Z"))
+	if len(m.visible) != 7 { // year + month + 2 days + 3 files
+		t.Errorf("%d rows visible after Z, want the whole tree back", len(m.visible))
+	}
+}
+
+// f keeps the day being worked on open and folds everything else away.
+func TestFocusCurrent(t *testing.T) {
+	m := navModel(t)
+	for i, n := range m.visible {
+		if n.level == 3 && n.day == "2026-03-25" && n.fileIdx == 1 {
+			m.cursor = i
+		}
+	}
+
+	m.handleMainKey(key("f"))
+
+	if lvl, k := rowAt(m); lvl != 3 || k != "DCIM/DSC_0003.NEF" {
+		t.Fatalf("row %d %q, want the cursor left on its file", lvl, k)
+	}
+	if m.expanded["2026/2026-03/2026-03-24"] {
+		t.Error("the other day is still open")
+	}
+	for _, n := range m.visible {
+		if n.level == 3 && n.day != "2026-03-25" {
+			t.Fatalf("files of %s are still listed", n.day)
+		}
+	}
+}

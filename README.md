@@ -232,6 +232,10 @@ copy/sync/verify with live parallel progress bars.
 - `h`/`l` (or `←`/`→`) walk the tree: `l` opens a date group and steps into it,
   `h` closes it and steps back out — from a file, `h` closes the day it sits in
   and leaves the cursor there
+- `[` / `]` jump between date groups without stepping over every frame — `[`
+  from inside a day lands on that day's own row
+- `z` folds the tree back to the list of years, `Z` unfolds it again, and `f`
+  folds everything except the date under the cursor
 - `g` opens a scrollable thumbnail grid for a date group — thumbnails load as
   you scroll, and `y` starts a copy directly from the grid
 - Copies show per-file progress bars plus overall throughput and ETA;

@@ -788,6 +788,21 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "h", "left":
 		return m.leaveNode()
 
+	case "]", "}":
+		return m.jumpDay(1)
+
+	case "[", "{":
+		return m.jumpDay(-1)
+
+	case "z":
+		return m.setAllExpanded(false)
+
+	case "Z":
+		return m.setAllExpanded(true)
+
+	case "f", "F":
+		return m.focusCurrent()
+
 	case "g", "G":
 		// Enter ScreenGrid for current date group.
 		if len(m.visible) == 0 {
@@ -890,6 +905,92 @@ func (m *Model) leaveNode() (tea.Model, tea.Cmd) {
 	m.cursor = parent
 	m.rebuildVisible()
 	return m, m.maybeLoadThumb()
+}
+
+// jumpDay moves to the next (dir=1) or previous (dir=-1) date row. A day can
+// hold hundreds of frames, so stepping over one with j/k is not navigation —
+// and going back lands on the day the cursor is already inside, which is the
+// quickest way to the top of a long day.
+func (m *Model) jumpDay(dir int) (tea.Model, tea.Cmd) {
+	for i := m.cursor + dir; i >= 0 && i < len(m.visible); i += dir {
+		if m.visible[i].level == 2 {
+			m.cursor = i
+			return m, m.maybeLoadThumb()
+		}
+	}
+	return m, nil
+}
+
+// setAllExpanded folds the whole tree open or shut. A scan of a full card
+// opens every day at once, which is the wrong altitude to start from: z gives
+// back the list of years, Z puts every frame back on screen.
+func (m *Model) setAllExpanded(open bool) (tea.Model, tea.Cmd) {
+	var focus treeNode
+	if m.cursor < len(m.visible) {
+		focus = m.visible[m.cursor]
+	}
+	for key := range m.expanded {
+		m.expanded[key] = open
+	}
+	m.rebuildVisible()
+	m.relocate(focus)
+	return m, m.maybeLoadThumb()
+}
+
+// focusCurrent closes every group except the one the cursor is in, leaving the
+// day being worked on open in an otherwise folded tree.
+func (m *Model) focusCurrent() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.visible) {
+		return m, nil
+	}
+	focus := m.visible[m.cursor]
+	for key := range m.expanded {
+		m.expanded[key] = false
+	}
+	m.expanded[focus.year] = true
+	if focus.level >= 1 {
+		m.expanded[focus.year+"/"+focus.month] = true
+	}
+	if focus.level >= 2 {
+		m.expanded[focus.year+"/"+focus.month+"/"+focus.day] = true
+	}
+	m.rebuildVisible()
+	m.relocate(focus)
+	return m, m.maybeLoadThumb()
+}
+
+// relocate puts the cursor back on target after a rebuild. When target itself
+// is no longer listed — its group was just folded shut — the cursor settles on
+// the nearest ancestor that is, so a fold never dumps the user at row 0.
+func (m *Model) relocate(target treeNode) {
+	for level := target.level; level >= 0; level-- {
+		probe := target
+		probe.level = level
+		if i := m.indexOf(probe); i >= 0 {
+			m.cursor = i
+			return
+		}
+	}
+}
+
+// indexOf finds the row showing n, or -1 when it is not currently listed.
+func (m *Model) indexOf(n treeNode) int {
+	for i, v := range m.visible {
+		if v.level != n.level || v.year != n.year {
+			continue
+		}
+		if n.level >= 1 && v.month != n.month {
+			continue
+		}
+		if n.level >= 2 && v.day != n.day {
+			continue
+		}
+		if n.level == 3 && v.fileIdx != n.fileIdx {
+			continue
+		}
+		return i
+	}
+	return -1
 }
 
 // parentIndex returns the row holding the group that contains idx, or -1 for a
