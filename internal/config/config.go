@@ -35,28 +35,47 @@ type Config struct {
 	// Legacy single-root keys — rejected with a migration hint in Load.
 	LegacySSD string `toml:"ssd"`
 	LegacyNAS string `toml:"nas"`
+
+	// sourceOverride is a source device picked at runtime (the TUI's device
+	// picker). It is not a config key: swapping cards mid-session should not
+	// rewrite config.toml, so it lives in front of source/extra_sources for
+	// this run only. See SetSourceOverride.
+	sourceOverride string
 }
 
-// SourceCandidates returns every configured source device in priority order:
-// source first, then extra_sources.
+// SetSourceOverride makes path the first source candidate for this run,
+// without touching config.toml. Pass "" to drop back to the configured
+// devices.
+func (c *Config) SetSourceOverride(path string) { c.sourceOverride = path }
+
+// SourceOverride returns the runtime source device, "" when none is set.
+func (c *Config) SourceOverride() string { return c.sourceOverride }
+
+// SourceCandidates returns every source device in priority order: a runtime
+// override first (see SetSourceOverride), then source, then extra_sources.
 func (c *Config) SourceCandidates() []string {
-	out := make([]string, 0, 1+len(c.ExtraSources))
-	if c.Source != "" {
+	out := make([]string, 0, 2+len(c.ExtraSources))
+	if c.sourceOverride != "" {
+		out = append(out, c.sourceOverride)
+	}
+	if c.Source != "" && c.Source != c.sourceOverride {
 		out = append(out, c.Source)
 	}
 	for _, p := range c.ExtraSources {
-		if p != "" {
+		if p != "" && p != c.sourceOverride {
 			out = append(out, p)
 		}
 	}
 	return out
 }
 
-// ActiveSource returns the first configured source device that is currently
-// mounted — source, then each entry of extra_sources in order. This is what
-// lets one config serve a camera card reader and an external SSD: plug either
-// one in and it becomes the source. When nothing is mounted it returns source
-// so messages still name a real configured path.
+// ActiveSource returns the first source device that is currently mounted — the
+// runtime override, then source, then each entry of extra_sources in order.
+// This is what lets one config serve a camera card reader and an external SSD:
+// plug either one in and it becomes the source. A device picked in the TUI
+// wins while it stays mounted, and unplugging it falls back to the configured
+// list rather than leaving the source pointing at an empty slot. When nothing
+// is mounted it returns source so messages still name a real configured path.
 //
 // Unlike a destination root, a source must exist as a directory: an empty
 // mount point would otherwise look like an empty card.

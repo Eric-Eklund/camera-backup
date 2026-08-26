@@ -34,6 +34,7 @@ const (
 	screenErrors          // error summary
 	screenHelp            // keybinding reference
 	screenSettings        // editable config.toml
+	screenDevices         // mounted devices, for picking the source
 )
 
 type progressMode int
@@ -68,6 +69,8 @@ type Model struct {
 	// configPath is where the settings screen writes; empty disables editing.
 	configPath string
 	settings   *settingsForm
+	// picker is the device screen's state; nil when it is not open.
+	picker *devicePicker
 	// watcherStop stops the running device watcher. Closed and replaced when
 	// the configured paths change, so the watcher follows the new ones.
 	watcherStop chan struct{}
@@ -111,6 +114,7 @@ type Model struct {
 	kitty          bool // terminal supports Kitty Graphics Protocol
 	prevScreen     Screen
 	helpReturn     Screen // screen to return to when help closes
+	helpOffset     int    // first visible help line; the reference outgrows short terminals
 	gridYear       string
 	gridMonth      string
 	gridDay        string
@@ -209,10 +213,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case statusReadyMsg:
-		// Only apply on the loading/main/settings screens — never yank the user
-		// out of a running operation, confirm dialog, or preview. The settings
-		// screen stays put: it triggers rescans itself after a save.
-		if m.screen != screenLoading && m.screen != screenMain && m.screen != screenSettings {
+		// Only apply on the loading/main/settings/devices screens — never yank
+		// the user out of a running operation, confirm dialog, or preview. The
+		// settings and device screens stay put: they trigger rescans themselves
+		// and show the outcome in place.
+		if m.screen != screenLoading && m.screen != screenMain &&
+			m.screen != screenSettings && m.screen != screenDevices {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -232,7 +238,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.buildTabs()
 		m.setTab(m.activeTab)
-		if m.screen != screenSettings {
+		if m.screen != screenSettings && m.screen != screenDevices {
 			m.screen = screenMain
 		}
 		m.statusMsg = ""
@@ -245,11 +251,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ignore device events during operations; a fresh scan runs when the
 		// user returns to the main screen anyway. The settings screen accepts
 		// them so plugging a device in updates its ✔/✘ markers live.
-		if m.screen != screenMain && m.screen != screenLoading && m.screen != screenSettings {
+		if m.screen != screenMain && m.screen != screenLoading &&
+			m.screen != screenSettings && m.screen != screenDevices {
 			return m, nil
 		}
 		m.statusMsg = "Rescanning…"
+		if m.screen == screenDevices && m.picker != nil {
+			// A card just went in or came out: the list on screen is stale.
+			m.picker.loading = true
+			return m, tea.Batch(scanDevicesCmd(), statusScanCmd(m.cfg, m.logger))
+		}
 		return m, statusScanCmd(m.cfg, m.logger)
+
+	case devicesReadyMsg:
+		if m.picker == nil {
+			return m, nil
+		}
+		m.picker.apply(msg.devs, msg.err)
+		return m, nil
 
 	case fileProgressMsg:
 		fp := msg.p
@@ -419,6 +438,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenGrid:
 		return m.handleGridKey(msg)
 
+	case screenDevices:
+		return m.handleDevicesKey(msg)
+
 	case screenPreview:
 		return m.handlePreviewKey(msg)
 
@@ -482,6 +504,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q", "?":
 			m.screen = m.helpReturn
+		case "j", "down":
+			m.scrollHelp(1)
+		case "k", "up":
+			m.scrollHelp(-1)
 		case "ctrl+c":
 			return m, tea.Quit
 		}
@@ -549,6 +575,16 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", " ":
 		f.startEdit()
 
+	case "d":
+		if !f.canPickDevice() {
+			f.err = "the device list fills the source fields — move to one of those"
+			return m, nil
+		}
+		f.err, f.notice = "", ""
+		m.picker = newDevicePicker(pickerField, m.cfg.ActiveSource(), f.fields[f.cursor].label)
+		m.screen = screenDevices
+		return m, scanDevicesCmd()
+
 	case "s":
 		return m, m.saveSettings()
 
@@ -597,6 +633,9 @@ func (m *Model) saveSettings() tea.Cmd {
 		return nil
 	}
 
+	// config.toml now spells out the source devices, so a device picked
+	// earlier in this session must stop overriding what was just saved.
+	draft.SetSourceOverride("")
 	m.cfg = draft
 	f.dirty = false
 	f.confirmExit = false
@@ -609,6 +648,90 @@ func (m *Model) saveSettings() tea.Cmd {
 	m.selected = map[string]bool{}
 	m.statusMsg = "Rescanning after config change…"
 	return tea.Batch(m.restartWatcher(), statusScanCmd(m.cfg, m.logger))
+}
+
+// openDevicePicker shows the mounted devices so the source can be swapped
+// without editing config.toml.
+func (m *Model) openDevicePicker() (tea.Model, tea.Cmd) {
+	// The last scan's source is what the file list on screen describes; before
+	// the first scan lands, fall back to what the config resolves to.
+	active := m.cfg.ActiveSource()
+	if m.status != nil {
+		active = m.status.Source
+	}
+	m.picker = newDevicePicker(pickerSwap, active, "")
+	m.screen = screenDevices
+	return m, scanDevicesCmd()
+}
+
+func (m *Model) handleDevicesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	p := m.picker
+	if p == nil {
+		m.screen = screenMain
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "j", "down":
+		p.moveCursor(1)
+
+	case "k", "up":
+		p.moveCursor(-1)
+
+	case "r":
+		p.loading, p.err, p.notice = true, "", ""
+		return m, scanDevicesCmd()
+
+	case "enter", " ":
+		d, ok := p.current()
+		if !ok {
+			break
+		}
+		if p.mode == pickerField {
+			return m, m.fillSettingsPath(d.Path)
+		}
+		return m, m.useDevice(d)
+
+	case "s":
+		// Only the swap picker writes config.toml directly; in field mode the
+		// settings screen's own [s] does the saving.
+		if p.mode != pickerSwap {
+			break
+		}
+		d, ok := p.current()
+		if !ok {
+			break
+		}
+		return m, m.saveDeviceAsSource(d)
+
+	case "esc", "q":
+		m.closePicker()
+	}
+	return m, nil
+}
+
+// closePicker returns to whichever screen opened the picker.
+func (m *Model) closePicker() {
+	if m.picker != nil && m.picker.mode == pickerField && m.settings != nil {
+		m.screen = screenSettings
+	} else {
+		m.screen = screenMain
+	}
+	m.picker = nil
+}
+
+// fillSettingsPath writes a picked device path into the focused settings field
+// and returns to the form, where it is saved like any typed value.
+func (m *Model) fillSettingsPath(path string) tea.Cmd {
+	if m.settings != nil {
+		m.settings.applyPickedPath(path)
+	}
+	m.picker = nil
+	m.screen = screenSettings
+	return nil
 }
 
 func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -689,6 +812,9 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		m.toggleSelect()
 
+	case "d", "D":
+		return m.openDevicePicker()
+
 	case "c", "C":
 		m.settings = newSettingsForm(m.cfg, m.configPath)
 		if m.configPath == "" {
@@ -698,6 +824,7 @@ func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "?":
 		m.helpReturn = screenMain
+		m.helpOffset = 0
 		m.screen = screenHelp
 	}
 	return m, nil
@@ -812,6 +939,7 @@ func (m *Model) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startCopy()
 	case "?":
 		m.helpReturn = screenGrid
+		m.helpOffset = 0
 		m.screen = screenHelp
 	case " ":
 		if m.gridCursor < len(files) {
@@ -1371,6 +1499,20 @@ func (m *Model) currentFile() *scan.FileInfo {
 }
 
 // View renders the current screen.
+// scrollHelp moves the help window, stopping at the last line that has
+// anything below it so the screen never scrolls past its own content.
+func (m *Model) scrollHelp(delta int) {
+	avail := m.helpHeight()
+	total := len(helpBody(m.helpBlocks(), avail))
+	m.helpOffset += delta
+	if max := total - avail; m.helpOffset > max {
+		m.helpOffset = max
+	}
+	if m.helpOffset < 0 {
+		m.helpOffset = 0
+	}
+}
+
 func (m *Model) View() string {
 	switch m.screen {
 	case screenLoading:
@@ -1393,6 +1535,8 @@ func (m *Model) View() string {
 		return m.renderHelp()
 	case screenSettings:
 		return m.renderSettings()
+	case screenDevices:
+		return m.renderDevices()
 	}
 	return ""
 }

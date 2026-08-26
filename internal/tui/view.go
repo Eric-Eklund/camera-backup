@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Eric-Eklund/camera-backup/internal/devices"
 	"github.com/Eric-Eklund/camera-backup/internal/preview"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 )
@@ -182,7 +183,7 @@ func (m *Model) renderStatusBar() string {
 		copyHint = "[y] dump → NAS"
 	}
 	hints := "[tab] tabs  [j/k] move  [enter] expand/preview  [space] select  [g] grid  " +
-		copyHint + "  [v] verify  [c] settings  [?] help  [q] quit"
+		copyHint + "  [v] verify  [d] devices  [c] settings  [?] help  [q] quit"
 	if n := len(m.selected); n > 0 {
 		var selBytes int64
 		for _, f := range m.allFiles {
@@ -791,7 +792,7 @@ func (m *Model) renderSettings() string {
 	if f.dirty {
 		title = "Settings •"
 	}
-	hint := "[j/k] move  [enter] edit/toggle  [s] save  [r] reload  [esc] back"
+	hint := "[j/k] move  [enter] edit/toggle  [d] devices  [s] save  [r] reload  [esc] back"
 	if f.editing {
 		hint = "[enter] accept  [esc] cancel  [ctrl+u] clear  [←→] move  typing edits the value"
 	}
@@ -806,8 +807,161 @@ func renderToggle(value string) string {
 	return styleDim.Render("[ ] off")
 }
 
+// renderDevices renders the device picker: every mounted filesystem that could
+// hold media, with the one in use marked. Removable devices and anything
+// carrying a DCIM directory sort first, so the card just plugged in is the row
+// the cursor lands on.
+func (m *Model) renderDevices() string {
+	p := m.picker
+	if p == nil {
+		return m.screenFrame("Devices", "\n  No device list.", "[esc] back")
+	}
+
+	title := "Devices"
+	hint := "[j/k] move  [enter] use as source  [s] save to config.toml  [r] refresh  [esc] back"
+	if p.mode == pickerField {
+		title = "Devices → " + p.fieldLabel
+		hint = "[j/k] move  [enter] use this path  [r] refresh  [esc] back"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+
+	switch {
+	case p.loading:
+		sb.WriteString("  " + styleDim.Render("Scanning mounted devices…") + "\n")
+	case p.err != "":
+		sb.WriteString("  " + styleErr.Render("✘ "+p.err) + "\n")
+	case len(p.devs) == 0:
+		sb.WriteString("  " + styleWarn.Render("No usable devices found.") + "\n")
+		sb.WriteString("  " + styleDim.Render("Plug in a card reader or drive, then press [r].") + "\n")
+	default:
+		sb.WriteString(m.renderDeviceRows(p))
+	}
+
+	if d, ok := p.current(); ok && !p.loading {
+		sb.WriteString("\n  " + styleDim.Render(d.Path))
+		if d.Node != "" {
+			sb.WriteString(styleDim.Render("  ← " + d.Node + " (" + d.FSType + ")"))
+		}
+		sb.WriteString("\n")
+	}
+
+	switch {
+	case p.err != "" && len(p.devs) > 0:
+		sb.WriteString("\n  " + styleErr.Render("✘ "+p.err) + "\n")
+	case p.notice != "":
+		sb.WriteString("\n  " + styleOK.Render("✔ "+p.notice) + "\n")
+	case p.mode == pickerSwap && !p.loading:
+		// The long form does not fit an 80-column terminal, where the panel
+		// would clip it mid-sentence.
+		note := "[enter] use for this session · [s] also save to config.toml"
+		if m.width >= 100 {
+			note = "[enter] uses the device for this session and rescans against " +
+				destinationsInUse(m.cfg) + " · [s] also writes it to config.toml"
+		}
+		sb.WriteString("\n  " + styleDim.Render(note) + "\n")
+	}
+
+	return m.screenFrame(title, sb.String(), hint)
+}
+
+// renderDeviceRows lays the device list out in fixed columns, giving the path
+// whatever width is left — at 80 columns the name, kind and free space still
+// have to fit.
+func (m *Model) renderDeviceRows(p *devicePicker) string {
+	const (
+		nameW = 18
+		kindW = 11
+		freeW = 15
+	)
+	pathW := m.width - nameW - kindW - freeW - 14
+	if pathW < 10 {
+		pathW = 10
+	}
+
+	header := fmt.Sprintf("      %-*s %-*s %-*s %s",
+		nameW, "DEVICE", kindW, "TYPE", pathW, "MOUNT POINT", "FREE")
+	var sb strings.Builder
+	sb.WriteString("  " + styleDim.Render(header) + "\n")
+
+	for i, d := range p.devs {
+		cursorMark := "  "
+		if i == p.cursor {
+			cursorMark = styleWarn.Render("▶ ")
+		}
+		// ● is the device the next scan will read — either the one in use, or
+		// the row about to replace it.
+		active := styleDim.Render("○ ")
+		if d.Path == p.active {
+			active = styleOK.Render("● ")
+		}
+
+		name := truncate(d.Name(), nameW)
+		if d.HasDCIM {
+			// A DCIM directory means a camera wrote this card.
+			name = truncate(d.Name(), nameW-5) + " DCIM"
+		}
+		nameCol := fmt.Sprintf("%-*s", nameW, name)
+		if i == p.cursor {
+			nameCol = styleFieldLabelFocus.Render(nameCol)
+		} else {
+			nameCol = styleFieldValue.Render(nameCol)
+		}
+
+		free := styleDim.Render(fmt.Sprintf("%*s", freeW, "—"))
+		if d.TotalBytes > 0 {
+			free = styleDim.Render(fmt.Sprintf("%*s", freeW,
+				devices.FormatBytes(d.FreeBytes)+" free"))
+		}
+
+		sb.WriteString(fmt.Sprintf("  %s%s%s %s %s %s\n",
+			cursorMark, active, nameCol,
+			deviceKindLabel(d.Kind, kindW),
+			styleDim.Render(fmt.Sprintf("%-*s", pathW, truncate(d.Path, pathW))),
+			free))
+	}
+	return sb.String()
+}
+
+// deviceKindLabel colours how a device is attached: what the user just plugged
+// in should stand out from the disk the system booted off.
+func deviceKindLabel(k devices.Kind, w int) string {
+	text := fmt.Sprintf("%-*s", w, k.String())
+	switch k {
+	case devices.KindRemovable:
+		return styleOK.Render(text)
+	case devices.KindNetwork:
+		return styleWarn.Render(text)
+	}
+	return styleDim.Render(text)
+}
+
 // renderHelp renders the keybinding reference screen.
 func (m *Model) renderHelp() string {
+	blocks := m.helpBlocks()
+	avail := m.helpHeight()
+	lines, off, more := helpWindow(helpBody(blocks, avail), m.helpOffset, avail)
+	hint := "[Esc/q/?] back"
+	if more || off > 0 {
+		hint = "[j/k] scroll  " + hint
+	}
+	return m.screenFrame("Help", "\n"+strings.Join(lines, "\n"), hint)
+}
+
+// helpHeight is how many body lines the help screen can show: the frame takes
+// the top and bottom border and the status bar, and the body opens with a
+// blank line.
+func (m *Model) helpHeight() int {
+	h := m.height - 4
+	if h < 4 {
+		h = 4
+	}
+	return h
+}
+
+// helpBlocks builds the keybinding reference, one block per section.
+func (m *Model) helpBlocks() [][]string {
 	type binding struct{ keys, desc string }
 	type section struct {
 		title    string
@@ -831,11 +985,19 @@ func (m *Model) renderHelp() string {
 		{"Actions", []binding{
 			{"y", copyDesc},
 			{"v", "verify checksums (camera vs SSD vs NAS)"},
+			{"d", "devices — pick the card or drive to back up from"},
 			{"c", "settings — edit paths and options, saved to config.toml"},
+		}},
+		{"Device screen", []binding{
+			{"enter", "use as the source now — rescans against SSD/NAS"},
+			{"s", "also save it to config.toml as source"},
+			{"r", "rescan for mounted devices"},
+			{"esc", "back"},
 		}},
 		{"Settings screen", []binding{
 			{"enter / space", "edit a value · toggle · cycle choices"},
 			{"s · r", "save to config.toml · reload from it"},
+			{"d", "pick a source path from the device list"},
 			{"ctrl+u", "clear the field while editing"},
 			{"esc", "cancel the edit, or leave the screen"},
 		}},
@@ -856,18 +1018,60 @@ func (m *Model) renderHelp() string {
 		}},
 	}
 
-	var sb strings.Builder
+	blocks := make([][]string, 0, len(sections))
 	for _, sec := range sections {
-		sb.WriteString("\n  " + styleHeader.Render(sec.title) + "\n")
+		block := []string{"  " + styleHeader.Render(sec.title)}
 		for _, b := range sec.bindings {
-			sb.WriteString(fmt.Sprintf("    %s  %s\n",
+			block = append(block, fmt.Sprintf("    %s  %s",
 				styleOK.Render(fmt.Sprintf("%-16s", b.keys)), styleDim.Render(b.desc)))
 		}
+		blocks = append(blocks, block)
 	}
-	return m.screenFrame("Help", sb.String(), "[Esc/q/?] back")
+	return blocks
 }
 
-// renderDone renders the completion screen.
+// helpBody lays the help sections out for the available height: spaced when
+// there is room, otherwise packed together. What still does not fit is reached
+// by scrolling — the screen has no room to lose a keybinding silently.
+func helpBody(blocks [][]string, height int) []string {
+	if lines := flattenHelp(blocks, true); len(lines) <= height {
+		return lines
+	}
+	return flattenHelp(blocks, false)
+}
+
+// flattenHelp joins section blocks into lines, optionally with a blank line
+// between sections.
+func flattenHelp(blocks [][]string, spaced bool) []string {
+	var out []string
+	for i, b := range blocks {
+		if spaced && i > 0 {
+			out = append(out, "")
+		}
+		out = append(out, b...)
+	}
+	return out
+}
+
+// helpWindow clamps a scroll offset to what the screen can show, returning the
+// visible slice and whether anything is left above or below.
+func helpWindow(lines []string, offset, height int) (window []string, off int, more bool) {
+	if height < 1 {
+		height = 1
+	}
+	if max := len(lines) - height; offset > max {
+		offset = max
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	end := offset + height
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return lines[offset:end], offset, end < len(lines)
+}
+
 func (m *Model) renderDone() string {
 	var sb strings.Builder
 	sb.WriteString("\n" + styleOK.Render("  Done!") + "\n\n")

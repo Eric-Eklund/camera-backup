@@ -14,6 +14,7 @@ import (
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
+	"github.com/Eric-Eklund/camera-backup/internal/devices"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
 	"github.com/Eric-Eklund/camera-backup/internal/tui"
@@ -60,6 +61,7 @@ to make that the default for "copy" and the TUI.`,
 		newDumpCmd(&configPath),
 		newSyncCmd(&configPath),
 		newVerifyCmd(&configPath),
+		newDevicesCmd(&configPath),
 		newTUICmd(&configPath),
 	)
 
@@ -568,6 +570,74 @@ func isDir(path string) bool {
 	}
 	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
+}
+
+// newDevicesCmd lists what is mounted right now, so the mount point of a card
+// or drive can be copied into config.toml instead of hunted for with lsblk.
+// The TUI does the same from its device screen, where a device can also be
+// picked outright.
+func newDevicesCmd(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "devices",
+		Short: "List mounted devices that could serve as a source",
+		Long: `List the filesystems mounted on this machine — card readers, USB drives,
+internal disks and network shares — with the mount point to put in config.toml.
+
+Removable devices come first, and a device holding a DCIM directory (a card
+straight out of a camera) comes first of all. The device currently acting as
+the source is marked.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			devs, err := devices.List()
+			if err != nil {
+				return fmt.Errorf("cannot list devices: %w", err)
+			}
+
+			// The config is only used to mark the active source, so a missing
+			// or broken config still leaves a usable listing.
+			active, configured := "", map[string]bool{}
+			if cfg, err := config.Load(*configPath); err == nil {
+				active = cfg.ActiveSource()
+				for _, p := range cfg.SourceCandidates() {
+					configured[p] = true
+				}
+			}
+
+			if len(devs) == 0 {
+				ui.Yellow.Println("\n  No usable devices found.")
+				fmt.Println()
+				return nil
+			}
+
+			fmt.Println()
+			ui.Bold.Println("  Mounted devices")
+			fmt.Println("  " + strings.Repeat("─", 72))
+			for _, d := range devs {
+				mark := " "
+				switch {
+				case d.Path == active:
+					mark = ui.Green.Sprint("●")
+				case configured[d.Path]:
+					mark = ui.Dim.Sprint("○")
+				}
+				name := d.Name()
+				if d.HasDCIM {
+					name += " (DCIM)"
+				}
+				free := "—"
+				if d.TotalBytes > 0 {
+					free = devices.FormatBytes(d.FreeBytes) + " free"
+				}
+				fmt.Printf("  %s %-22s %-10s %-30s %s\n",
+					mark, name, d.Kind, d.Path, ui.Dim.Sprint(free))
+			}
+			fmt.Println()
+			ui.Dim.Println("  ● current source   ○ listed in config.toml")
+			ui.Dim.Println("  Set one with: source = \"<mount point>\" in config.toml,")
+			ui.Dim.Println("  or pick it live in the TUI with [d].")
+			fmt.Println()
+			return nil
+		},
+	}
 }
 
 func newTUICmd(configPath *string) *cobra.Command {

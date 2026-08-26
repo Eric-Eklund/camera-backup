@@ -242,7 +242,7 @@ func TestSave_TemplateRoundTrip(t *testing.T) {
 	if !strings.Contains(text, "# camera-backup configuration template.") {
 		t.Errorf("template header was lost:\n%s", text)
 	}
-	if strings.Contains(text, "Added by the settings screen") {
+	if strings.Contains(text, "Added by camera-backup") {
 		t.Errorf("template should already contain every managed key:\n%s", text)
 	}
 }

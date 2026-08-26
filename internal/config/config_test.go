@@ -363,3 +363,54 @@ func writeTempConfig(t *testing.T, content string) string {
 	}
 	return path
 }
+
+func TestSourceOverride_WinsWhileMounted(t *testing.T) {
+	card := t.TempDir()
+	picked := t.TempDir()
+	cfg := &config.Config{Source: card}
+	cfg.SetSourceOverride(picked)
+
+	if got := cfg.ActiveSource(); got != picked {
+		t.Errorf("ActiveSource() = %q, want the picked device %q", got, picked)
+	}
+	if got := cfg.SourceOverride(); got != picked {
+		t.Errorf("SourceOverride() = %q, want %q", got, picked)
+	}
+	if cands := cfg.SourceCandidates(); len(cands) != 2 || cands[0] != picked || cands[1] != card {
+		t.Errorf("SourceCandidates() = %v, want [%q %q]", cands, picked, card)
+	}
+}
+
+// Unplugging a picked card must not leave the source pointing at an empty
+// slot — the configured devices are still there to fall back on.
+func TestSourceOverride_FallsBackWhenUnmounted(t *testing.T) {
+	card := t.TempDir()
+	cfg := &config.Config{Source: card}
+	cfg.SetSourceOverride(filepath.Join(t.TempDir(), "unplugged"))
+
+	if got := cfg.ActiveSource(); got != card {
+		t.Errorf("ActiveSource() = %q, want the configured card %q", got, card)
+	}
+}
+
+func TestSourceOverride_NotDuplicatedInCandidates(t *testing.T) {
+	cfg := &config.Config{Source: "/cam", ExtraSources: []string{"/drive"}}
+	cfg.SetSourceOverride("/drive")
+
+	cands := cfg.SourceCandidates()
+	if len(cands) != 2 || cands[0] != "/drive" || cands[1] != "/cam" {
+		t.Errorf("SourceCandidates() = %v, want [/drive /cam]", cands)
+	}
+}
+
+func TestSourceOverride_ClearedRestoresConfigured(t *testing.T) {
+	card := t.TempDir()
+	picked := t.TempDir()
+	cfg := &config.Config{Source: card}
+	cfg.SetSourceOverride(picked)
+	cfg.SetSourceOverride("")
+
+	if got := cfg.ActiveSource(); got != card {
+		t.Errorf("ActiveSource() = %q, want %q after clearing the override", got, card)
+	}
+}

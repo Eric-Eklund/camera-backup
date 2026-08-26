@@ -248,6 +248,35 @@ func (f *settingsForm) setValue(v string) {
 	f.confirmExit = false
 }
 
+// canPickDevice reports whether the focused field holds a source device path,
+// the only kind the device list can fill: a NAS or SSD root is a fixed mount
+// point that outlives any one card.
+func (f *settingsForm) canPickDevice() bool {
+	switch f.fields[f.cursor].path {
+	case pathSource, pathSourceList:
+		return true
+	}
+	return false
+}
+
+// applyPickedPath writes a path chosen from the device list into the focused
+// field: replacing the value of a single-path field, appending to a list
+// (where a path already present is left alone rather than duplicated).
+func (f *settingsForm) applyPickedPath(path string) {
+	fl := f.fields[f.cursor]
+	if fl.kind != fieldList {
+		f.setValue(path)
+		return
+	}
+	items := splitList(fl.value)
+	for _, it := range items {
+		if it == path {
+			return
+		}
+	}
+	f.setValue(strings.Join(append(items, path), ", "))
+}
+
 func (f *settingsForm) moveCursor(delta int) {
 	f.cursor += delta
 	if f.cursor < 0 {

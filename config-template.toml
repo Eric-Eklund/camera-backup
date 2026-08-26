@@ -7,7 +7,10 @@
 # screen, `s` to save. It rewrites values in place and leaves these comments
 # alone, so editing by hand and editing in the TUI are interchangeable.
 
-source = "/run/media/user/CAMERA-CARD" # Camera / memory card (mount point)
+# Camera / memory card (mount point). Run `camera-backup devices` to list what
+# is mounted right now, or press `d` in the TUI to pick a device from that list
+# — either beats guessing where udisks put the card.
+source = "/run/media/user/CAMERA-CARD"
 
 # Additional source devices, tried in order when `source` is not mounted
 # (optional) — e.g. a second card reader or an external SSD. Whichever one is
