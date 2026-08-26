@@ -54,7 +54,7 @@ Seven subcommands (Cobra CLI):
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
 | `internal/checksum` | SHA256 with optional progress writer |
-| `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI (`status_test.go` covers the fan-in: category routing, merged roots, direct mode, the no-camera fallback, unstable files, root availability, source resolution) |
+| `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI; `NewReport()`/`WriteJSON()` are the `--json` form, whose field names are a public contract (`json_test.go` pins them) (`status_test.go` covers the fan-in: category routing, merged roots, direct mode, the no-camera fallback, unstable files, root availability, source resolution) |
 | `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
 | `internal/preview` | Thumbnails (JPEG direct, RAW via exiftool), ANSI block art, Kitty Graphics Protocol; `scaleImage` halves large frames before the resampling kernel (`prescale`) |
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher, settings screen (`settings.go`) |
@@ -277,6 +277,24 @@ as a `prune` command, built, and rejected for exactly this reason.)
 - Destination modtime is set to source modtime
 - All extension and path comparisons are lowercased
 - Free disk space is validated before any copy phase starts (`copyop.CheckSpace`, shared by CLI and TUI; groups roots by filesystem so a shared disk isn't double-counted)
+
+### The JSON status report
+
+`status --json` is read by things nobody in this repository controls — a
+waybar module, a cron job, a home automation sensor — so two rules hold:
+
+- **Field names are a contract.** Renaming one silently breaks somebody's
+  panel; `TestReport_Schema` makes that a deliberate act rather than a
+  refactor.
+- **Not-computed is `null`, never `0`.** `Compute` skips comparisons depending
+  on what is mounted and whether the SSD is bypassed, and `NewReport` mirrors
+  those branches exactly. A consumer that cannot tell "nothing is missing" from
+  "this was never compared" will report a backup as complete when it was never
+  checked. `compared` names which comparison ran.
+
+It is a snapshot, not a stream: a poll during a copy starts a second scan of
+the same devices. Live progress would need the *copying* process to emit its
+`copyop.FileProgress` events, which nothing outside the process can see today.
 
 ### TUI specifics
 
