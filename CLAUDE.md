@@ -54,7 +54,7 @@ Seven subcommands (Cobra CLI):
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
 | `internal/checksum` | SHA256 with optional progress writer |
-| `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI |
+| `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI (`status_test.go` covers the fan-in: category routing, merged roots, direct mode, the no-camera fallback, unstable files, root availability, source resolution) |
 | `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
 | `internal/preview` | Thumbnails (JPEG direct, RAW via exiftool), ANSI block art, Kitty Graphics Protocol |
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher, settings screen (`settings.go`) |
