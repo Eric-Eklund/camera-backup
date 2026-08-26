@@ -54,7 +54,7 @@ Seven subcommands (Cobra CLI):
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
 | `internal/checksum` | SHA256 with optional progress writer |
-| `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI |
+| `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI (`status_test.go` covers the fan-in: category routing, merged roots, direct mode, the no-camera fallback, unstable files, root availability, source resolution) |
 | `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
 | `internal/preview` | Thumbnails (JPEG direct, RAW via exiftool), ANSI block art, Kitty Graphics Protocol; `scaleImage` halves large frames before the resampling kernel (`prescale`) |
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher, settings screen (`settings.go`) |
@@ -152,8 +152,16 @@ bury a whole shoot under the date it was copied.
   a scan works on a bare system. EXIF (`DateTimeOriginal`, then
   `DateTimeDigitized`, then IFD0 `DateTime`) for JPEG and every TIFF-based RAW
   (NEF, CR2, ARW, DNG, ORF, RW2, PEF), the wrapped JPEG's EXIF for Fujifilm RAF,
-  and `moov`/`mvhd` for MP4/MOV. HEIC/AVIF are not parsed and fall back to the
-  modtime. An all-zero date (camera clock never set) counts as absent.
+  and `moov`/`mvhd` for MP4/MOV. HEIC/AVIF go through the same ISO-BMFF door as
+  a video: `bmffCaptureTime` looks for a movie header first and falls back to
+  `heifExifTime`, which reads the `meta` box (`iinf` names the EXIF item,
+  `iloc` says where its bytes are) and hands the TIFF block inside it to the
+  same EXIF reader. Deciding on content rather than on the `ftyp` brand is
+  deliberate — there are dozens of brands and new ones keep arriving — and it
+  keeps Canon CR3 working, since that is BMFF with a real `moov`. An item
+  stored by `construction_method` 1 (inside the meta box) is refused rather
+  than read as a file offset. An all-zero date (camera clock never set) counts
+  as absent.
 - EXIF timestamps carry no zone — they are the camera's local wall clock, so
   they are read as local time. QuickTime times are UTC and converted.
 - `scan.WalkSource()` = `Walk` + `FillCaptureTimes` (bounded worker pool).
