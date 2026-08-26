@@ -15,6 +15,7 @@ import (
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
 	"github.com/Eric-Eklund/camera-backup/internal/devices"
+	"github.com/Eric-Eklund/camera-backup/internal/prune"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
 	"github.com/Eric-Eklund/camera-backup/internal/tui"
@@ -62,6 +63,7 @@ to make that the default for "copy" and the TUI.`,
 		newSyncCmd(&configPath),
 		newVerifyCmd(&configPath),
 		newDevicesCmd(&configPath),
+		newPruneCmd(&configPath),
 		newTUICmd(&configPath),
 	)
 
@@ -570,6 +572,133 @@ func isDir(path string) bool {
 	}
 	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
+}
+
+// newPruneCmd frees space on the SSD once the NAS holds a verified copy. It is
+// the only command that deletes anything, so it does nothing by default: a run
+// without --delete prints the plan and stops.
+func newPruneCmd(configPath *string) *cobra.Command {
+	var (
+		doDelete  bool
+		assumeYes bool
+		olderDays int
+	)
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Delete SSD files whose NAS copy is SHA256-verified (dry run by default)",
+		Long: `Free space on the local SSD by deleting files the NAS already holds.
+
+Every candidate is decided by reading both copies in full and comparing their
+SHA256 hashes. A file is kept whenever anything is off — no copy on the NAS, a
+different size, a hash that disagrees, or a NAS root that is not mounted — and
+a hash that disagrees is reported loudly, because it means one of the two
+copies is damaged.
+
+Nothing is deleted without --delete: a plain run prints what would go. The
+camera and the NAS are never touched; only the SSD is.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger, cleanup, err := initLogger()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			cfg, err := mustLoadConfig(*configPath)
+			if err != nil {
+				return err
+			}
+
+			opt := prune.Options{OlderThan: time.Duration(olderDays) * 24 * time.Hour}
+			fmt.Println()
+			ui.Bold.Println("  Comparing SSD against NAS (SHA256)…")
+			plan, err := prune.Build(cfg, logger, opt, func(done, total int, path string) {
+				fmt.Printf("\r  %d/%d  %-50s", done, total, truncateLeft(filepath.Base(path), 50))
+			})
+			fmt.Print("\r\033[K")
+			if err != nil {
+				return err
+			}
+			printPrunePlan(plan, olderDays)
+
+			if len(plan.Delete) == 0 {
+				return nil
+			}
+			if !doDelete {
+				ui.Dim.Println("  Dry run — nothing was deleted. Re-run with --delete to free the space.")
+				fmt.Println()
+				return nil
+			}
+			if !assumeYes && !ui.AskYesNo(fmt.Sprintf("  Delete %d file(s) from the SSD, freeing %s?",
+				len(plan.Delete), ui.FormatBytes(plan.Bytes))) {
+				ui.Dim.Println("  Nothing deleted.")
+				fmt.Println()
+				return nil
+			}
+
+			deleted, freed, errs := prune.Apply(cfg, plan, logger)
+			for _, e := range errs {
+				ui.Red.Printf("  ❌  %v\n", e)
+			}
+			ui.Green.Printf("\n  ✅  %d file(s) deleted, %s freed on the SSD.\n\n",
+				deleted, ui.FormatBytes(freed))
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&doDelete, "delete", false, "Actually delete the verified files")
+	cmd.Flags().BoolVar(&assumeYes, "yes", false, "Skip the confirmation prompt (for scripts)")
+	cmd.Flags().IntVar(&olderDays, "older-than", 0, "Only prune files shot more than N days ago")
+	return cmd
+}
+
+// printPrunePlan reports what the comparison found: what can go, and what was
+// kept and why. Mismatches come first — a file that hashes differently on the
+// two devices is a damaged copy, not a housekeeping detail.
+func printPrunePlan(plan *prune.Plan, olderDays int) {
+	if plan.Mismatches > 0 {
+		ui.Red.Printf("\n  ⚠  %d file(s) differ between SSD and NAS — one copy is damaged:\n", plan.Mismatches)
+		for _, c := range plan.Keep {
+			if c.Reason == prune.ReasonMismatch {
+				fmt.Printf("      %s\n", c.File.RelPath)
+			}
+		}
+	}
+
+	kept := map[prune.Reason]int{}
+	for _, c := range plan.Keep {
+		kept[c.Reason]++
+	}
+
+	fmt.Println()
+	ui.Bold.Println("  Prune plan")
+	fmt.Println("  " + strings.Repeat("─", 52))
+	if len(plan.Delete) == 0 {
+		fmt.Println("  Nothing on the SSD has a verified copy on the NAS.")
+	} else {
+		fmt.Printf("  Verified on NAS, safe to delete :  %d  (%s)\n",
+			len(plan.Delete), ui.FormatBytes(plan.Bytes))
+		first, last := plan.Delete[0].File.DateTaken(), plan.Delete[len(plan.Delete)-1].File.DateTaken()
+		fmt.Printf("  Dates                           :  %s → %s\n",
+			first.Format("2006-01-02"), last.Format("2006-01-02"))
+	}
+	for _, r := range []prune.Reason{prune.ReasonMismatch, prune.ReasonMissing,
+		prune.ReasonSize, prune.ReasonTooRecent, prune.ReasonRootUnavailable} {
+		if n := kept[r]; n > 0 {
+			fmt.Printf("  Kept, %-32s :  %d\n", r, n)
+		}
+	}
+	if olderDays > 0 {
+		ui.Dim.Printf("  (only files shot more than %d day(s) ago were considered)\n", olderDays)
+	}
+	fmt.Println()
+}
+
+// truncateLeft shortens a path for the progress line, keeping the tail.
+func truncateLeft(s string, w int) string {
+	r := []rune(s)
+	if len(r) <= w {
+		return s
+	}
+	return "…" + string(r[len(r)-w+1:])
 }
 
 // newDevicesCmd lists what is mounted right now, so the mount point of a card

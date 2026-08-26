@@ -35,13 +35,14 @@ Three-stage incremental backup pipeline: **Camera → SSD → NAS**, plus a
 **direct Source → NAS** path that bypasses the local SSD (`dump`, or
 `direct_to_nas = true`).
 
-Seven subcommands (Cobra CLI):
+Eight subcommands (Cobra CLI):
 - `status` — scans all three destinations and shows missing file counts + free space
 - `copy` — Camera→SSD (CopyAndVerify) then SSD→NAS (fast Copy); runs `runDirect` instead when `direct_to_nas` is set
 - `dump` — Source→NAS directly (CopyAndVerify), no local SSD; same `--videos-only/-v`, `--photos-only/-p` and `--order` flags as `sync`. Always available, regardless of `direct_to_nas`
 - `sync` — SSD→NAS only, no camera required; `--videos-only/-v` and `--photos-only/-p` filter by category (mutually exclusive); `--order=size-asc` sorts the batch smallest-first; default order comes from `nas_sync_order` (videos first when unset)
 - `verify` — deep SHA256 check; uses camera as authority, falls back to SSD if camera absent
 - `devices` — lists mounted filesystems that could be a source, marking the active one
+- `prune` — deletes SSD files whose NAS copy hashes identical; dry run unless `--delete`
 - `tui` — interactive bubbletea TUI wrapping all of the above with parallel copy workers
 
 **Package responsibilities:**
@@ -50,6 +51,7 @@ Seven subcommands (Cobra CLI):
 |---|---|
 | `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` + `runDirect()` orchestration, logging init |
 | `internal/config` | TOML loading + `Validate()` + `Save()` (comment-preserving write-back), extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SetSourceOverride()`, `SSDInUse()` |
+| `internal/prune` | `Build()` compares SSD against NAS by SHA256 and returns a plan; `Apply()` deletes it. The only code in the tool that removes a file the user put there |
 | `internal/devices` | Linux mounted-device discovery (`/proc/self/mountinfo` + `/sys/class/block`) for the source picker |
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
@@ -241,6 +243,29 @@ JPEG, TIFF, RAF and MP4 fixtures (`buildJPEG`, `buildTIFF`, `buildRAF`,
 Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also probes basename+size **anywhere** in the destination tree — an old backup, or a source-modtime change on a file with no capture metadata, must not duplicate the file under a second date directory — but only skips on that evidence once the capture times agree; see "Is this destination file the same photograph?" above.
 
 Source files whose modtime is within `scan.StableAge` (10 s) of the scan are treated as still being written and skipped with a warning (`scan.SplitStable`, applied in `runCopy`, `runDirect` and `status.Compute` → `StatusResult.CameraUnstable`); copying mid-write would produce a truncated destination. Far-future modtimes (wrong camera clock) are treated as stable.
+
+### Pruning the SSD
+
+`prune` is the only command that deletes anything, so every rule around it is a
+safety rule rather than a feature:
+
+- A file is proposed for deletion **only** on a full SHA256 of both copies read
+  in that pass. Size is a pre-filter (a difference settles it without reading
+  either file), never evidence of sameness — the whole `MissingFromDest` story
+  about basename+size collisions applies here with deletion as the cost.
+- Equal size + differing hash is surfaced as a damaged copy, not as a skip.
+- Anything unresolved keeps the file: no NAS copy, unmounted NAS root, an
+  unreadable file. `Build` refuses outright unless both SSD and NAS roots are
+  configured.
+- `Apply` never re-decides; it deletes exactly what `Build` verified moments
+  earlier, and only under the SSD roots.
+- Emptied date directories are removed, the configured roots never are
+  (`under()` returns false for the root itself).
+- `Build` calls `scan.FillCaptureTimes` even though it is a destination scan —
+  the one place that happens. `--older-than` has to mean the day the shutter
+  fired, and on a staging copy the modtime often says otherwise.
+- It is CLI-only on purpose: a destructive action reached by a single keystroke
+  in the TUI is a different risk profile, and the confirmation is the point.
 
 ### Key invariants
 

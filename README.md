@@ -15,6 +15,7 @@ Built in Go. Never deletes or overwrites source files.
 3. `camera-backup copy` — copies camera → SSD with SHA256 verification, then asks whether to continue to NAS (disconnect the camera first)
 4. `camera-backup sync` — copies SSD → NAS when network is available (videos first); run overnight if needed
 5. `camera-backup verify` — SHA256 check across all destinations; run after sync to confirm integrity
+6. `camera-backup prune` — when the SSD fills up, free the space the NAS already holds
 
 ### At home / full sync
 
@@ -39,6 +40,9 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
 
 - Source files are **never deleted** by this tool
 - Source files are opened **read-only**
+- The **one** command that deletes anything is `prune`, and only ever from the
+  local SSD, only for files whose NAS copy it has just hashed and found
+  identical, and only when asked with `--delete`
 - Destination files are **never overwritten** — if a filename already exists, the new file is saved with a `_1`, `_2`, … suffix and a warning is printed
 - Memory cards are always formatted manually in-camera
 - Copy order is `Camera → SSD → NAS` by default. `camera-backup dump` (or
@@ -192,6 +196,41 @@ Two limits worth knowing. Verify is **source-driven**: it checks the files on
 the authority (the card, or the SSD when no card is connected), so verifying one
 card confirms that card's photos, not the whole NAS. And it only sees extensions
 listed in `file_extensions` — the same blind spot `status` and `copy` have.
+
+### `camera-backup prune`
+
+Frees space on the staging SSD by deleting files the NAS already holds:
+
+```
+camera-backup prune                      # dry run: what could go, and what stays
+camera-backup prune --older-than 14      # leave the last two weeks on the SSD
+camera-backup prune --delete             # do it, after a confirmation
+camera-backup prune --delete --yes       # do it without asking (scripts)
+```
+
+This is the only command that deletes anything, so it is deliberately narrow:
+
+- Each candidate is decided by reading **both** copies in full and comparing
+  SHA256 hashes. Names and sizes only decide what is worth hashing.
+- A file is kept whenever anything is off — no copy on the NAS, a different
+  size, a hash that disagrees, or a NAS root that is not mounted.
+- A hash that disagrees is reported **loudly**: two files of the same size that
+  hash differently mean one of the copies is damaged, which is worth knowing
+  long before the SSD is cleared.
+- Only the SSD is touched. The camera and the NAS are never written to.
+- Nothing happens without `--delete`; a plain run prints the plan and stops.
+- `--older-than` counts from the **capture date**, so "the last two weeks"
+  means the last two weeks of shooting, not of file copying.
+- Date directories left empty are removed; the configured roots are not.
+
+```
+  Prune plan
+  ────────────────────────────────────────────────────
+  Verified on NAS, safe to delete :  412  (38.4 GB)
+  Dates                           :  2026-03-25 → 2026-07-02
+  Kept, not on the NAS            :  18
+  Kept, newer than the cutoff     :  96
+```
 
 ### `camera-backup devices`
 
@@ -591,6 +630,7 @@ camera-backup/
 ├── internal/
 │   ├── config/              # TOML loading, extension matching, worker counts
 │   ├── devices/             # Mounted-device discovery (mountinfo + sysfs)
+│   ├── prune/               # Delete SSD files whose NAS copy hashes identical
 │   ├── scan/                # File scanning and comparison
 │   ├── checksum/            # SHA256 calculation
 │   ├── copyop/              # Copy with progress + verification (serial + parallel)
