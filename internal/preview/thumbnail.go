@@ -24,9 +24,15 @@ import (
 var ErrNoRAWTool = errors.New("exiftool not found in PATH — RAW previews unavailable")
 
 // rawExts are the extensions whose preview is extracted with exiftool.
+//
+// HEIF stills (Canon writes .HIF, an iPhone .HEIC) are in the list because Go
+// cannot decode them either, and a camera-written HEIF usually carries an
+// embedded JPEG preview that exiftool can pull out. Where there is none — an
+// iPhone frame, most AVIF — the panel says so, exactly as it does for a video.
 var rawExts = map[string]struct{}{
 	".nef": {}, ".nrw": {}, ".cr2": {}, ".cr3": {}, ".arw": {}, ".dng": {},
 	".orf": {}, ".rw2": {}, ".raf": {}, ".pef": {}, ".srw": {}, ".raw": {},
+	".heic": {}, ".heif": {}, ".hif": {}, ".avif": {},
 }
 
 // thumbPreviewTags lists the embedded images tried when building a small

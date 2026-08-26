@@ -44,11 +44,11 @@ func CaptureTime(absPath string) (t time.Time, ok bool) {
 		t, err = tiffCaptureTime(f, 0)
 	case string(head[:8]) == "FUJIFILM": // Fujifilm RAF wraps a full JPEG
 		t, err = rafCaptureTime(f)
-	case string(head[4:8]) == "ftyp": // ISO-BMFF: MP4, MOV, M4V
+	case string(head[4:8]) == "ftyp": // ISO-BMFF: MP4, MOV, M4V, HEIC, AVIF
 		t, err = bmffCaptureTime(f)
 	default:
-		// Unrecognised container (HEIC/AVIF/WebP among them): the caller falls
-		// back to the modtime.
+		// Unrecognised container (WebP among them): the caller falls back to
+		// the modtime.
 		return time.Time{}, false
 	}
 	if err != nil || t.IsZero() {
@@ -274,10 +274,23 @@ func parseEXIFDate(s string) (time.Time, bool) {
 // quickTimeEpoch is the zero point of QuickTime/ISO-BMFF timestamps.
 var quickTimeEpoch = time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// bmffCaptureTime reads the creation time from an MP4/MOV movie header.
+// bmffCaptureTime reads the capture time from an ISO base media file. The
+// family covers both a camera's videos and its stills: MP4 and MOV carry a
+// movie header, while HEIC and AVIF carry an EXIF item alongside the picture.
+// Which kind it is comes from what the file actually contains rather than from
+// the brand in its ftyp box — there are dozens of those and new ones arrive
+// with every codec.
+func bmffCaptureTime(r io.ReadSeeker) (time.Time, error) {
+	if t, err := movieHeaderTime(r); err == nil {
+		return t, nil
+	}
+	return heifExifTime(r)
+}
+
+// movieHeaderTime reads the creation time from an MP4/MOV movie header.
 // The moov atom may sit before or after the media data, so top-level atoms are
 // walked by seeking rather than reading the file.
-func bmffCaptureTime(r io.ReadSeeker) (time.Time, error) {
+func movieHeaderTime(r io.ReadSeeker) (time.Time, error) {
 	moovOff, moovSize, err := findAtom(r, 0, 0, "moov")
 	if err != nil {
 		return time.Time{}, err
@@ -306,6 +319,227 @@ func bmffCaptureTime(r io.ReadSeeker) (time.Time, error) {
 	// both kinds of file sort into the same day directory.
 	return t.Local(), nil
 }
+
+// heifExifTime reads the EXIF block of a HEIC or AVIF still.
+//
+// A camera that shoots HEIF (Canon writes .HIF, an iPhone .HEIC) records the
+// same EXIF tags a JPEG would carry, but stores them as a *metadata item*
+// rather than a header: the meta box says which item holds the EXIF and where
+// in the file that item's bytes live, and those bytes are a TIFF block the
+// existing EXIF reader already understands.
+func heifExifTime(r io.ReadSeeker) (time.Time, error) {
+	metaOff, metaSize, err := findAtom(r, 0, 0, "meta")
+	if err != nil {
+		return time.Time{}, err
+	}
+	// meta is a FullBox: its children start after the version and flags.
+	metaOff, metaSize = metaOff+4, metaSize-4
+	if metaSize <= 0 {
+		return time.Time{}, errNoDate
+	}
+
+	itemID, err := exifItemID(r, metaOff, metaSize)
+	if err != nil {
+		return time.Time{}, err
+	}
+	off, length, err := itemExtent(r, metaOff, metaSize, itemID)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	// The item opens with the distance from the end of that field to the TIFF
+	// header, which is where the "Exif\0\0" marker a JPEG puts in its APP1
+	// segment goes when it is present.
+	var lead [4]byte
+	if length < int64(len(lead))+8 {
+		return time.Time{}, errNoDate
+	}
+	if _, err := readAt(r, off, lead[:]); err != nil {
+		return time.Time{}, err
+	}
+	skip := int64(binary.BigEndian.Uint32(lead[:]))
+	if skip+4+8 > length {
+		return time.Time{}, errNoDate
+	}
+	return tiffCaptureTime(r, off+4+skip)
+}
+
+// exifItemID finds the id of the item holding the EXIF block by walking the
+// item information box. Each infe entry names one item's type; from version 2
+// of that entry the type is a four-character code, which is what tells the
+// EXIF apart from the picture itself.
+func exifItemID(r io.ReadSeeker, metaOff, metaSize int64) (uint32, error) {
+	iinfOff, iinfSize, err := findAtom(r, metaOff, metaSize, "iinf")
+	if err != nil {
+		return 0, err
+	}
+	var head [8]byte
+	if _, err := readAt(r, iinfOff, head[:]); err != nil {
+		return 0, err
+	}
+	// entry_count is 16-bit in version 0 and 32-bit from version 1 on.
+	entries := int64(binary.BigEndian.Uint16(head[4:6]))
+	off := iinfOff + 6
+	if head[0] > 0 {
+		entries = int64(binary.BigEndian.Uint32(head[4:8]))
+		off = iinfOff + 8
+	}
+	if entries > maxHEIFItems {
+		entries = maxHEIFItems
+	}
+
+	end := iinfOff + iinfSize
+	for i := int64(0); i < entries && off+8 <= end; i++ {
+		var bh [8]byte
+		if _, err := readAt(r, off, bh[:]); err != nil {
+			return 0, err
+		}
+		size := int64(binary.BigEndian.Uint32(bh[0:4]))
+		if size < 8 || off+size > end {
+			return 0, errNoDate
+		}
+		if string(bh[4:8]) == "infe" {
+			// Body layout after the 4 version/flags bytes:
+			//   version 2: item_ID uint16, protection uint16, item_type 4cc
+			//   version 3: item_ID uint32, protection uint16, item_type 4cc
+			var body [14]byte
+			want := int64(12)
+			if size-8 >= 14 {
+				want = 14
+			}
+			if size-8 >= want {
+				if _, err := readAt(r, off+8, body[:want]); err != nil {
+					return 0, err
+				}
+				switch body[0] {
+				case 2:
+					if string(body[8:12]) == "Exif" {
+						return uint32(binary.BigEndian.Uint16(body[4:6])), nil
+					}
+				case 3:
+					if want == 14 && string(body[10:14]) == "Exif" {
+						return binary.BigEndian.Uint32(body[4:8]), nil
+					}
+				}
+			}
+		}
+		off += size
+	}
+	return 0, errNoDate
+}
+
+// itemExtent returns where an item's bytes live, from the item location box.
+// Only the first extent is read: an EXIF block is written in one piece, and a
+// file that scatters it is not one this needs to serve.
+func itemExtent(r io.ReadSeeker, metaOff, metaSize int64, itemID uint32) (off, length int64, err error) {
+	ilocOff, ilocSize, err := findAtom(r, metaOff, metaSize, "iloc")
+	if err != nil {
+		return 0, 0, err
+	}
+	var head [10]byte
+	if _, err := readAt(r, ilocOff, head[:]); err != nil {
+		return 0, 0, err
+	}
+	version := head[0]
+	// Four nibbles give the width in bytes of the fields below.
+	offsetSize := int64(head[4] >> 4)
+	lengthSize := int64(head[4] & 0x0f)
+	baseOffsetSize := int64(head[5] >> 4)
+	indexSize := int64(head[5] & 0x0f)
+
+	count := int64(binary.BigEndian.Uint16(head[6:8]))
+	pos := ilocOff + 8
+	idWidth := int64(2)
+	if version >= 2 {
+		count = int64(binary.BigEndian.Uint32(head[6:10]))
+		pos = ilocOff + 10
+		idWidth = 4
+	}
+	if count > maxHEIFItems {
+		count = maxHEIFItems
+	}
+
+	end := ilocOff + ilocSize
+	for i := int64(0); i < count && pos < end; i++ {
+		id, err := readUint(r, pos, idWidth)
+		if err != nil {
+			return 0, 0, err
+		}
+		pos += idWidth
+		var construction uint64
+		if version == 1 || version == 2 {
+			if construction, err = readUint(r, pos, 2); err != nil {
+				return 0, 0, err
+			}
+			construction &= 0x0f
+			pos += 2
+		}
+		pos += 2 // data_reference_index
+		base, err := readUint(r, pos, baseOffsetSize)
+		if err != nil {
+			return 0, 0, err
+		}
+		pos += baseOffsetSize
+		extents, err := readUint(r, pos, 2)
+		if err != nil {
+			return 0, 0, err
+		}
+		pos += 2
+
+		extentIndex := int64(0)
+		if (version == 1 || version == 2) && indexSize > 0 {
+			extentIndex = indexSize
+		}
+		if uint32(id) == itemID {
+			if extents == 0 {
+				return 0, 0, errNoDate
+			}
+			// construction_method 1 keeps the bytes inside the meta box itself
+			// instead of at a file offset. No camera writes EXIF that way, and
+			// reading it as an offset would land somewhere arbitrary.
+			if construction != 0 {
+				return 0, 0, errNoDate
+			}
+			p := pos + extentIndex
+			eo, err := readUint(r, p, offsetSize)
+			if err != nil {
+				return 0, 0, err
+			}
+			el, err := readUint(r, p+offsetSize, lengthSize)
+			if err != nil {
+				return 0, 0, err
+			}
+			return int64(base + eo), int64(el), nil
+		}
+		pos += int64(extents) * (extentIndex + offsetSize + lengthSize)
+	}
+	return 0, 0, errNoDate
+}
+
+// readUint reads a big-endian unsigned integer of width bytes. Width comes
+// from the file and is 0, 4 or 8 in practice; 0 means the field is absent and
+// reads as zero.
+func readUint(r io.ReadSeeker, off, width int64) (uint64, error) {
+	if width == 0 {
+		return 0, nil
+	}
+	if width > 8 {
+		return 0, errors.New("bmff: field too wide")
+	}
+	var buf [8]byte
+	if _, err := readAt(r, off, buf[:width]); err != nil {
+		return 0, err
+	}
+	var v uint64
+	for i := int64(0); i < width; i++ {
+		v = v<<8 | uint64(buf[i])
+	}
+	return v, nil
+}
+
+// maxHEIFItems caps how many items are walked, so a corrupt count cannot turn
+// into an endless walk over a file.
+const maxHEIFItems = 4096
 
 // findAtom scans the atom list starting at off for name and returns the offset
 // and size of its payload. limit bounds the search (0 = to end of file).
