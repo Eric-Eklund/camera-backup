@@ -107,6 +107,7 @@ func (l *linuxLister) list() ([]Device, error) {
 	}
 
 	l.probeAll(devs)
+	devs = dropNonDirs(devs)
 	sortDevices(devs)
 	return devs, nil
 }
@@ -128,6 +129,9 @@ func (l *linuxLister) probeAll(devs []Device) {
 					probed.TotalBytes = fs.total
 					probed.FreeBytes = fs.free
 				}
+				if st, err := os.Stat(d.Path); err == nil && !st.IsDir() {
+					probed.notDir = true
+				}
 				if st, err := os.Stat(filepath.Join(d.Path, "DCIM")); err == nil && st.IsDir() {
 					probed.HasDCIM = true
 				}
@@ -141,6 +145,19 @@ func (l *linuxLister) probeAll(devs []Device) {
 		}(&devs[i])
 	}
 	wg.Wait()
+}
+
+// dropNonDirs removes mount points that turned out not to be directories. A
+// device whose probe timed out keeps its place: an unresponsive share is far
+// more likely to be a directory than a bind-mounted file.
+func dropNonDirs(devs []Device) []Device {
+	out := devs[:0]
+	for _, d := range devs {
+		if !d.notDir {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // blockKind decides how a block device is attached. A card reader is what

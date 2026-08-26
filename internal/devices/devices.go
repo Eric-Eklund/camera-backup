@@ -56,6 +56,12 @@ type Device struct {
 	// TotalBytes and FreeBytes are 0 when the filesystem could not be probed
 	// (a hung network mount, a permission error).
 	TotalBytes, FreeBytes uint64
+
+	// notDir marks a mount point that is not a directory. A file can be a
+	// mount point of its own (a bind mount of /etc/hostname, of a sysfs
+	// attribute), and it turns up in mountinfo like any other mount — but it
+	// can never be a source device, so it is dropped from the listing.
+	notDir bool
 }
 
 // Name is the label when the filesystem has one, otherwise the last element of

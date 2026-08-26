@@ -188,6 +188,26 @@ func TestList_ClassifiesAndOrders(t *testing.T) {
 	}
 }
 
+// A file can be a mount point of its own — a bind mount of /etc/hostname, of a
+// sysfs attribute — and mountinfo lists it like any other mount. It can never
+// be a source device.
+func TestList_SkipsFileMountPoints(t *testing.T) {
+	f := newFakeTree(t)
+	f.addDisk(t, "pci0000:00/ata1", "sda", "sda2", false)
+	dir := t.TempDir()
+	file := filepath.Join(t.TempDir(), "hostname")
+	write(t, file, "nikon\n")
+
+	info := fmt.Sprintf("36 25 8:2 / %s rw - ext4 /dev/sda2 rw\n37 25 8:2 /etc/hostname %s rw - ext4 /dev/sda2 rw\n", dir, file)
+	got, err := f.lister(t, info).list()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Path != dir {
+		t.Fatalf("got %+v, want only the directory mount %q", got, dir)
+	}
+}
+
 func TestList_SDSlotIsRemovable(t *testing.T) {
 	f := newFakeTree(t)
 	// A PCIe SD reader: the disk reports removable = 0, and only the mmc_host
