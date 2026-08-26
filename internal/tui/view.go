@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/devices"
 	"github.com/Eric-Eklund/camera-backup/internal/preview"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
@@ -74,10 +75,7 @@ func (m *Model) renderMain() string {
 		midH = 4
 	}
 
-	detW := 34
-	if m.width < 70 {
-		detW = 0
-	}
+	detW := m.detailWidth()
 	treeW := m.width - detW
 
 	// Show the visible range in the panel title when the tree overflows.
@@ -94,6 +92,24 @@ func (m *Model) renderMain() string {
 	}
 
 	return m.renderHeaderRow() + "\n" + mid + "\n" + m.renderStatusBar()
+}
+
+// detailWidth is how many columns the Info panel gets, 0 when the terminal is
+// too narrow to carry one. It grows with the terminal because the preview
+// inside it is drawn a pixel per column: at 34 columns a landscape frame is
+// thirty pixels wide, which is barely a picture. The tree keeps the larger
+// share — its rows are what the panel describes.
+func (m *Model) detailWidth() int {
+	switch {
+	case m.width < 70:
+		return 0
+	case m.width < 120:
+		return 34
+	case m.width < 160:
+		return 44
+	default:
+		return 54
+	}
 }
 
 // renderHeaderRow lays out the tab bar on the left and device status on the right.
@@ -377,7 +393,46 @@ func (m *Model) noPreviewNote() string {
 	return "[no preview]"
 }
 
+// fileDetailLines is how many rows fileMetaLines spends above the preview.
+// infoPreviewRect places the Kitty image from the same number, so the two must
+// agree — TestFileMetaLines_MatchesConstant is what keeps them honest.
+const fileDetailLines = 6
+
 func (m *Model) renderFileDetail(f *scan.FileInfo, w, h int) []string {
+	lines := m.fileMetaLines(f, w)
+
+	// Thumbnail.
+	thumbH := h - len(lines) - 1
+	thumbW := w - 2
+	if thumbH <= 4 || thumbW <= 4 {
+		return lines
+	}
+	switch {
+	case m.cfg.ListPreview() == config.PreviewOff:
+		return lines
+	case m.kittyList():
+		// The image itself is drawn over these rows by syncInfoPreview once
+		// the frame has been flushed; the terminal paints it above the text.
+		if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
+			return append(lines, make([]string, thumbH)...)
+		}
+	}
+	img, loaded := m.thumbCache[f.AbsPath]
+	switch {
+	case loaded && img != nil:
+		art := preview.BlockArt(img, thumbW, thumbH)
+		lines = append(lines, strings.Split(strings.TrimRight(art, "\n"), "\n")...)
+	case loaded:
+		lines = append(lines, lipgloss.NewStyle().Width(w).Render(styleDim.Render("  "+m.noPreviewNote())))
+	default:
+		lines = append(lines, lipgloss.NewStyle().Width(w).Render(styleDim.Render("  Loading…")))
+	}
+	return lines
+}
+
+// fileMetaLines renders the file's details — exactly fileDetailLines rows, so
+// whatever draws the preview below them knows where they end.
+func (m *Model) fileMetaLines(f *scan.FileInfo, w int) []string {
 	var lines []string
 	add := func(s string) {
 		lines = append(lines, lipgloss.NewStyle().Width(w).Render(ansi.Truncate(s, w, "…")))
@@ -397,25 +452,6 @@ func (m *Model) renderFileDetail(f *scan.FileInfo, w, h int) []string {
 	add(styleDetailLabel.Render("Time:  ") + styleDetailValue.Render(taken.Format("15:04:05")))
 	add(styleDetailLabel.Render("Src:   ") + styleDetailValue.Render(truncate(f.AbsPath, w-8)))
 	add("")
-
-	// Thumbnail.
-	thumbH := h - len(lines) - 1
-	thumbW := w - 2
-	if thumbH > 4 && thumbW > 4 {
-		if img, ok := m.thumbCache[f.AbsPath]; ok {
-			if img != nil {
-				art := preview.BlockArt(img, thumbW, thumbH)
-				for _, al := range strings.Split(strings.TrimRight(art, "\n"), "\n") {
-					lines = append(lines, al)
-				}
-			} else {
-				add(styleDim.Render("  " + m.noPreviewNote()))
-			}
-		} else {
-			add(styleDim.Render("  Loading…"))
-		}
-	}
-
 	return lines
 }
 

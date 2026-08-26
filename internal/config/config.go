@@ -32,6 +32,10 @@ type Config struct {
 	NASWriteTimeoutSeconds int    `toml:"nas_write_timeout_seconds"`
 	NASSyncOrder           string `toml:"nas_sync_order"`
 
+	// ListPreviewMode decides how the TUI's Info panel draws the focused
+	// photograph. See the Preview* constants.
+	ListPreviewMode string `toml:"list_preview"`
+
 	// Legacy single-root keys — rejected with a migration hint in Load.
 	LegacySSD string `toml:"ssd"`
 	LegacyNAS string `toml:"nas"`
@@ -159,6 +163,31 @@ func (c *Config) SyncOrder() string {
 	return OrderVideosFirst
 }
 
+// How the Info panel draws its preview (list_preview).
+const (
+	// PreviewAuto uses the Kitty Graphics Protocol where the terminal speaks
+	// it (Kitty, Ghostty) and falls back to block art everywhere else. Block
+	// art spends one pixel per terminal column, which in a panel that narrow
+	// is barely a picture — where a real image can be drawn, it should be.
+	PreviewAuto = "auto"
+	// PreviewKitty asks for the graphics protocol even where detection says
+	// no — inside tmux with allow-passthrough turned on, for instance.
+	PreviewKitty = "kitty"
+	// PreviewBlocks forces the ANSI half-block rendering.
+	PreviewBlocks = "blocks"
+	// PreviewOff leaves the panel to the file's details.
+	PreviewOff = "off"
+)
+
+// ListPreview returns how the Info panel should draw previews, defaulting to
+// auto.
+func (c *Config) ListPreview() string {
+	if c.ListPreviewMode != "" {
+		return c.ListPreviewMode
+	}
+	return PreviewAuto
+}
+
 // NASWriteTimeout returns the per-file write timeout for SSD→NAS copies.
 // A hard-mounted NFS/CIFS share blocks indefinitely instead of erroring when
 // the connection drops, so writes are bounded rather than trusted to fail.
@@ -267,6 +296,12 @@ func (c *Config) Validate() error {
 	}
 	if c.NASSyncOrder != "" && c.NASSyncOrder != OrderVideosFirst && c.NASSyncOrder != OrderSizeAsc {
 		return fmt.Errorf("config: nas_sync_order must be %q or %q", OrderVideosFirst, OrderSizeAsc)
+	}
+	switch c.ListPreviewMode {
+	case "", PreviewAuto, PreviewKitty, PreviewBlocks, PreviewOff:
+	default:
+		return fmt.Errorf("config: list_preview must be %q, %q, %q or %q",
+			PreviewAuto, PreviewKitty, PreviewBlocks, PreviewOff)
 	}
 	return nil
 }

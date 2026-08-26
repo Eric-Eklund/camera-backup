@@ -18,7 +18,16 @@ const cellPxW, cellPxH = 9, 18
 
 // KittySupported reports whether the terminal likely speaks the Kitty
 // Graphics Protocol (Kitty itself, or Ghostty).
+//
+// Inside tmux it answers no even when the outer terminal does speak it: tmux
+// swallows the escape sequences unless allow-passthrough is turned on, and a
+// swallowed image is an empty panel with no hint as to why. Block art is drawn
+// out of ordinary cells and always survives the trip. Where passthrough *is*
+// configured, list_preview = "kitty" asks for the protocol anyway.
 func KittySupported() bool {
+	if os.Getenv("TMUX") != "" {
+		return false
+	}
 	if os.Getenv("KITTY_WINDOW_ID") != "" || os.Getenv("GHOSTTY_RESOURCES_DIR") != "" {
 		return true
 	}
