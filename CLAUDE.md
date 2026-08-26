@@ -56,7 +56,7 @@ Seven subcommands (Cobra CLI):
 | `internal/checksum` | SHA256 with optional progress writer |
 | `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI |
 | `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
-| `internal/preview` | Thumbnails (JPEG direct, RAW via exiftool), ANSI block art, Kitty Graphics Protocol |
+| `internal/preview` | Thumbnails (JPEG direct, RAW via exiftool), ANSI block art, Kitty Graphics Protocol; `scaleImage` halves large frames before the resampling kernel (`prescale`) |
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher, settings screen (`settings.go`) |
 | `internal/ui` | Terminal colors, progress bar, `Prompt()`, `AskYesNo()`, `FreeSpace()` |
 
@@ -266,6 +266,10 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 - Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1); NAS copies also honour `nas_write_timeout_seconds` and `nas_sync_order`. The write timeout is per-destination, not per-mode: pass it for any copy landing on the NAS (including verified direct dumps) and 0 for local Camera→SSD copies
 - All copy batches are launched through `Model.launchBatch` (progress reset, screen switch, worker pool + drain wiring) — add new modes there rather than duplicating the plumbing
 - Kitty graphics used for full-screen preview when `KittySupported()` (Ghostty/Kitty); block-art fallback otherwise; RAW previews need exiftool in PATH
+- `KittySupported()` answers **no inside tmux** ($TMUX set): tmux swallows the graphics escapes unless allow-passthrough is on, and a swallowed image is an empty panel with nothing to explain it. `list_preview = "kitty"` forces the protocol back on for that case
+- The Info panel draws the same image over its own cells when `kittyList()`: `renderFileDetail` reserves blank rows and `syncInfoPreview` (called from `maybeLoadThumb`, so on every cursor move) draws into `infoPreviewRect`. `kittyShown`/`kittyRect` make it redraw only when the file or the rectangle changes — otherwise a held-down `j` clears and re-sends an image per row. Leaving the main screen clears it, caught in one place: the `tea.KeyMsg` branch of `Update` compares the screen before and after the key
+- `fileDetailLines` is the contract between `fileMetaLines` and `infoPreviewRect` — if they disagree the image lands on top of the file's details (`TestFileMetaLines_MatchesConstant`)
+- `detailWidth()` widens the Info panel with the terminal (34/44/54 columns): block art spends one pixel per column, so panel width *is* preview resolution
 - RAW previews come from whichever embedded image a file actually has. **Nikon NEF has no `ThumbnailImage`** — asking exiftool for that tag alone returns zero bytes, which is why NEF thumbnails were blank in both the list and the grid. `preview.Thumbnail` tries `PreviewImage` → `ThumbnailImage` → `JpgFromRaw` → `ThumbnailTIFF` (small first, so one exiftool call suffices for NEF/CR2/ARW); `FullImage` tries the same set largest-first. `ThumbnailTIFF` is why `golang.org/x/image/tiff` is registered as a decoder
 - A failed thumbnail load is cached as nil like an unsupported one — without an entry the view would re-request it on every render. `preview.ErrNoRAWTool` sets `Model.rawToolMissing`, so the empty panel says to install exiftool instead of just `[no preview]`
 - The date tree, the detail panel and the preview footer all show `DateTaken()`, so what the TUI groups by matches where `copy` will actually put the file; a fallback to the modtime is marked `(file date)`

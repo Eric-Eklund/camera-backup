@@ -141,6 +141,12 @@ func newSettingsForm(cfg *config.Config, configPath string) *settingsForm {
 				value: cfg.SyncOrder(), choices: []string{config.OrderVideosFirst, config.OrderSizeAsc},
 				hint: "size-asc sends the smallest files first on a flaky link",
 			},
+			{
+				label: "List preview", key: "list_preview", kind: fieldEnum,
+				value:   cfg.ListPreview(),
+				choices: []string{config.PreviewAuto, config.PreviewKitty, config.PreviewBlocks, config.PreviewOff},
+				hint:    "auto draws a real image in Kitty/Ghostty; blocks is the ANSI fallback",
+			},
 		},
 	}
 }
@@ -197,6 +203,8 @@ func (f *settingsForm) toConfig(base *config.Config) (*config.Config, error) {
 			draft.NASWriteTimeoutSeconds = n
 		case "nas_sync_order":
 			draft.NASSyncOrder = value
+		case "list_preview":
+			draft.ListPreviewMode = value
 		}
 	}
 	if err := draft.Validate(); err != nil {

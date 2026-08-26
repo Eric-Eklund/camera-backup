@@ -244,6 +244,11 @@ copy/sync/verify with live parallel progress bars.
 - Image previews: JPEG directly; RAW (NEF, CR2, ARW, DNG, …) via `exiftool`
   (optional dependency) reading whichever preview the file embeds;
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
+- The Info panel draws the focused photograph the same way where the terminal
+  speaks that protocol — block art spends one pixel per terminal column, which
+  in a panel that narrow is barely a picture. `list_preview` in config.toml
+  picks the mode; the panel also widens with the terminal (34 → 44 → 54
+  columns)
 - `c` opens a **settings screen** that edits config.toml in place — see below
 - `d` opens a **device screen** listing everything mounted, so a different card
   or drive can be picked as the source mid-session — see below
@@ -375,6 +380,10 @@ nas_workers = 1               # SSD → NAS   (default 1)
 # the next file. Applies to both the CLI and the TUI.
 # See "Recommended NAS mount options" below.
 nas_write_timeout_seconds = 60
+
+# How the TUI's Info panel draws the focused photograph (optional):
+# "auto" (default), "kitty", "blocks" or "off" — see config-template.toml
+list_preview = "auto"
 
 # SSD → NAS transfer order (optional): "videos-first" (default) or "size-asc"
 # (smallest files first — most likely to complete on a flaky connection).
