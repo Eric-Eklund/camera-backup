@@ -151,6 +151,15 @@ func fullImageCmd(absPath string) tea.Cmd {
 // kittyDrawCmd draws img via the Kitty Graphics Protocol shortly after the
 // next bubbletea frame is flushed, so the image lands on top of the rendered
 // placeholder area.
+// kittyClearCmd removes whatever image the terminal is showing, on the same
+// delay as kittyDrawCmd so it lands after the frame that no longer wants it.
+func kittyClearCmd() tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		preview.KittyClear()
+		return nil
+	})
+}
+
 func kittyDrawCmd(img image.Image, cols, rows, row, col int) tea.Cmd {
 	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
 		preview.KittyClear()

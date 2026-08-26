@@ -112,14 +112,20 @@ type Model struct {
 	// installed, so the panels can say why instead of showing a blank box.
 	rawToolMissing bool
 	kitty          bool // terminal supports Kitty Graphics Protocol
-	prevScreen     Screen
-	helpReturn     Screen // screen to return to when help closes
-	helpOffset     int    // first visible help line; the reference outgrows short terminals
-	gridYear       string
-	gridMonth      string
-	gridDay        string
-	gridCursor     int
-	gridOffset     int // first visible thumbnail row (scroll position)
+	// kittyShown is the file whose image is currently drawn over the Info
+	// panel, with the cell rectangle it was drawn into. Redrawing only when
+	// one of them changes keeps a held-down j from clearing and re-sending an
+	// image on every row.
+	kittyShown string
+	kittyRect  [4]int
+	prevScreen Screen
+	helpReturn Screen // screen to return to when help closes
+	helpOffset int    // first visible help line; the reference outgrows short terminals
+	gridYear   string
+	gridMonth  string
+	gridDay    string
+	gridCursor int
+	gridOffset int // first visible thumbnail row (scroll position)
 
 	// copy/verify progress
 	progressMode  progressMode
@@ -169,7 +175,9 @@ func New(cfg *config.Config, logger *log.Logger, configPath string) *Model {
 		loadingThumb: map[string]bool{},
 		fullCache:    map[string]image.Image{},
 		loadingFull:  map[string]bool{},
-		kitty:        preview.KittySupported(),
+		// list_preview = "kitty" is the override for a terminal the detection
+		// cannot see through — tmux with allow-passthrough, say.
+		kitty:        preview.KittySupported() || cfg.ListPreview() == config.PreviewKitty,
 		expanded:     map[string]bool{},
 		selected:     map[string]bool{},
 		fileProgress: map[string]copyop.FileProgress{},
@@ -208,11 +216,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// The Info panel moved, so anything drawn over it is in the wrong place.
+		m.kittyShown = ""
+		return m, m.syncInfoPreview()
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		before := m.screen
+		model, cmd := m.handleKey(msg)
+		// Anything drawn over the Info panel belongs to the main screen only;
+		// catching the transition here covers every key that leaves it.
+		if m.kittyShown != "" && m.screen != before && m.screen != screenMain {
+			m.kittyShown = ""
+			cmd = tea.Batch(cmd, kittyClearCmd())
+		}
+		return model, cmd
 
-	case statusReadyMsg:
+	case statusReadyMsg: // scan finished: the tree is rebuilt below
 		// Only apply on the loading/main/settings/devices screens — never yank
 		// the user out of a running operation, confirm dialog, or preview. The
 		// settings and device screens stay put: they trigger rescans themselves
@@ -400,6 +419,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.kittyPreviewCmd(msg.img)
 			}
 		}
+		// On the main screen the same image goes into the Info panel, once it
+		// has finished loading.
+		if m.screen == screenMain {
+			if f := m.currentFile(); f != nil && f.AbsPath == msg.file {
+				return m, m.syncInfoPreview()
+			}
+		}
 	}
 
 	return m, nil
@@ -422,6 +448,73 @@ func (m *Model) kittyPreviewCmd(img image.Image) tea.Cmd {
 		return nil
 	}
 	return kittyDrawCmd(img, cols, rows, 3, 3)
+}
+
+// kittyList reports whether the Info panel's preview should be drawn as a real
+// image rather than block art.
+func (m *Model) kittyList() bool {
+	switch m.cfg.ListPreview() {
+	case config.PreviewAuto, config.PreviewKitty:
+		return m.kitty
+	}
+	return false
+}
+
+// syncInfoPreview keeps the image over the Info panel in step with the cursor:
+// it draws the focused file's thumbnail, moves it when the layout changes, and
+// takes it away when the cursor lands on something that has no picture — a
+// date group, a video, a RAW file with no reader for it.
+func (m *Model) syncInfoPreview() tea.Cmd {
+	if !m.kittyList() || m.screen != screenMain {
+		return nil
+	}
+
+	var img image.Image
+	path := ""
+	if f := m.currentFile(); f != nil {
+		if cached, ok := m.thumbCache[f.AbsPath]; ok && cached != nil {
+			img, path = cached, f.AbsPath
+		}
+	}
+	cols, rows, row, col, ok := m.infoPreviewRect()
+	if path == "" || !ok {
+		if m.kittyShown == "" {
+			return nil
+		}
+		m.kittyShown = ""
+		return kittyClearCmd()
+	}
+
+	rect := [4]int{cols, rows, row, col}
+	if m.kittyShown == path && m.kittyRect == rect {
+		return nil // already on screen, in the right place
+	}
+	m.kittyShown, m.kittyRect = path, rect
+	return kittyDrawCmd(img, cols, rows, row, col)
+}
+
+// infoPreviewRect is where the Info panel's preview sits, in 1-indexed
+// terminal cells: the panel starts after the tree, and the picture starts
+// under the file's details. ok is false when the panel is too small to hold
+// one — or absent entirely on a narrow terminal.
+func (m *Model) infoPreviewRect() (cols, rows, row, col int, ok bool) {
+	detW := m.detailWidth()
+	if detW == 0 {
+		return 0, 0, 0, 0, false
+	}
+	midH := m.height - 2
+	if midH < 4 {
+		midH = 4
+	}
+	// renderDetailPanel is handed detW-2 columns and midH-2 rows; the art is
+	// inset a further 2 columns and leaves a row at the bottom.
+	cols = detW - 4
+	rows = midH - 2 - fileDetailLines - 1
+	// Row 1 is the header, row 2 the panel's top border, so its first inner
+	// row is 3 — and the details take fileDetailLines of them.
+	row = 3 + fileDetailLines
+	col = m.width - detW + 2
+	return cols, rows, row, col, cols > 4 && rows > 4
 }
 
 // handleKey processes keyboard input based on the current screen.
@@ -737,6 +830,9 @@ func (m *Model) fillSettingsPath(path string) tea.Cmd {
 func (m *Model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		if m.kittyShown != "" {
+			preview.KittyClear()
+		}
 		return m, tea.Quit
 
 	case "tab":
@@ -1452,15 +1548,18 @@ func (m *Model) dayFiles(year, month, day string) []scan.FileInfo {
 // maybeLoadThumb fires thumbnail loads for the focused node: the file itself
 // on a file row, or the first few files of a date group so the Info panel's
 // mini-grid can render.
+// maybeLoadThumb loads what the focused row needs a picture of, and — since it
+// runs on every cursor move — is also where the Info panel's image is brought
+// in step with the cursor.
 func (m *Model) maybeLoadThumb() tea.Cmd {
 	if len(m.visible) == 0 || m.cursor >= len(m.visible) {
-		return nil
+		return m.syncInfoPreview()
 	}
 	node := m.visible[m.cursor]
 	switch node.level {
 	case 3:
 		f := m.tree[node.year][node.month][node.day][node.fileIdx]
-		return m.loadThumb(f.AbsPath)
+		return tea.Batch(m.loadThumb(f.AbsPath), m.syncInfoPreview())
 	case 2:
 		const maxLoads = 9 // generous upper bound for the mini-grid
 		var cmds []tea.Cmd
@@ -1472,9 +1571,9 @@ func (m *Model) maybeLoadThumb() tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 		}
-		return tea.Batch(cmds...)
+		return tea.Batch(append(cmds, m.syncInfoPreview())...)
 	}
-	return nil
+	return m.syncInfoPreview()
 }
 
 // resetProgress clears all per-batch progress state.

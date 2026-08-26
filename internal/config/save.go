@@ -94,6 +94,7 @@ func (c *Config) managedValues() []keyValue {
 		{"nas_workers", strconv.Itoa(c.NASWorkerCount())},
 		{"nas_write_timeout_seconds", strconv.Itoa(int(c.NASWriteTimeout().Seconds()))},
 		{"nas_sync_order", tomlString(c.SyncOrder())},
+		{"list_preview", tomlString(c.ListPreview())},
 	}
 }
 

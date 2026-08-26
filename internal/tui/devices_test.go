@@ -15,8 +15,10 @@ import (
 	"github.com/Eric-Eklund/camera-backup/internal/status"
 )
 
+func testLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+
 func testModel(cfg *config.Config, configPath string) *Model {
-	m := New(cfg, log.New(io.Discard, "", 0), configPath)
+	m := New(cfg, testLogger(), configPath)
 	m.screen = screenMain
 	return m
 }
