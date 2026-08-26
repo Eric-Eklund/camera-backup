@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"image"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Eric-Eklund/camera-backup/internal/config"
 	"github.com/Eric-Eklund/camera-backup/internal/scan"
@@ -80,8 +84,8 @@ func TestSyncInfoPreview_DrawsOnceAndRedrawsOnMove(t *testing.T) {
 	if cmd := m.syncInfoPreview(); cmd == nil {
 		t.Fatal("no draw command for a file with a loaded thumbnail")
 	}
-	if m.kittyShown != first {
-		t.Fatalf("kittyShown = %q, want %q", m.kittyShown, first)
+	if !strings.Contains(m.kittyShown, first) {
+		t.Fatalf("kittyShown = %q, want it to name %q", m.kittyShown, first)
 	}
 	// Nothing changed: a repaint must not re-send the image.
 	if cmd := m.syncInfoPreview(); cmd != nil {
@@ -169,5 +173,132 @@ func TestListPreviewKitty_ForcesTheProtocol(t *testing.T) {
 
 	if !m.kitty || !m.kittyList() {
 		t.Errorf("kitty = %v, kittyList = %v — want the protocol forced on", m.kitty, m.kittyList())
+	}
+}
+
+// gridModel puts the model on the grid screen with thumbnails loaded for a
+// day's files.
+func gridModel(t *testing.T, files int) *Model {
+	t.Helper()
+	m := testModel(baseCfg(), "")
+	m.kitty = true
+	m.width, m.height = 120, 30
+	day := time.Date(2026, 3, 25, 10, 0, 0, 0, time.Local)
+	var infos []scan.FileInfo
+	for i := 0; i < files; i++ {
+		f := scan.FileInfo{
+			AbsPath:     filepath.Join("/cam/DCIM", fmt.Sprintf("DSC_%04d.JPG", i)),
+			RelPath:     fmt.Sprintf("DCIM/DSC_%04d.JPG", i),
+			Size:        1024,
+			CaptureTime: day,
+		}
+		infos = append(infos, f)
+		m.thumbCache[f.AbsPath] = image.NewRGBA(image.Rect(0, 0, 160, 120))
+	}
+	m.allFiles = infos
+	m.buildTree()
+	m.rebuildVisible()
+	m.gridYear, m.gridMonth, m.gridDay = "2026", "2026-03", "2026-03-25"
+	m.screen = screenGrid
+	return m
+}
+
+// Every thumbnail of the visible window gets a cell rectangle, and the
+// rectangles tile the grid without overlapping or leaving the panel.
+func TestGridPlacements_TileTheWindow(t *testing.T) {
+	m := gridModel(t, 12)
+	places := m.gridPlacements()
+	if len(places) == 0 {
+		t.Fatal("no placements for a grid full of loaded thumbnails")
+	}
+
+	cols := m.gridCols()
+	if want := min(12, cols*m.gridVisibleRows()); len(places) != want {
+		t.Fatalf("%d placements, want %d (the visible window)", len(places), want)
+	}
+	seen := map[[2]int]bool{}
+	for _, p := range places {
+		if p.row < 2 || p.col < 2 {
+			t.Errorf("placement at %d,%d overlaps the panel border", p.row, p.col)
+		}
+		if right := p.col + p.cols - 1; right > m.width-1 {
+			t.Errorf("placement ends at column %d, past the panel", right)
+		}
+		if bottom := p.row + p.rows - 1; bottom > m.height-2 {
+			t.Errorf("placement ends at row %d, past the panel", bottom)
+		}
+		if seen[[2]int{p.row, p.col}] {
+			t.Errorf("two thumbnails share the cell %d,%d", p.row, p.col)
+		}
+		seen[[2]int{p.row, p.col}] = true
+	}
+}
+
+// Scrolling changes what is on screen, so the images are redrawn; scrolling
+// back to an identical window does not re-send them.
+func TestSyncGridPreview_RedrawsOnScroll(t *testing.T) {
+	m := gridModel(t, 40)
+
+	if cmd := m.syncGridPreview(); cmd == nil {
+		t.Fatal("no draw command for the first screenful")
+	}
+	first := m.kittyShown
+	if cmd := m.syncGridPreview(); cmd != nil {
+		t.Error("redrew a window that has not changed")
+	}
+
+	m.gridOffset++
+	if cmd := m.syncGridPreview(); cmd == nil {
+		t.Fatal("no redraw after scrolling")
+	}
+	if m.kittyShown == first {
+		t.Error("the signature did not change with the window")
+	}
+}
+
+// Moving the cursor within the same window only changes the labels, which are
+// text: the images must not be re-sent.
+func TestSyncGridPreview_CursorMoveDoesNotRedraw(t *testing.T) {
+	m := gridModel(t, 12)
+	m.syncGridPreview()
+	before := m.kittyShown
+
+	m.gridCursor = 2
+	if cmd := m.syncGridPreview(); cmd != nil {
+		t.Error("moving the cursor re-sent the images")
+	}
+	if m.kittyShown != before {
+		t.Error("the signature changed although the window did not")
+	}
+}
+
+// Leaving the grid takes its images away.
+func TestGrid_LeavingClearsTheImages(t *testing.T) {
+	m := gridModel(t, 6)
+	m.syncGridPreview()
+	if m.kittyShown == "" {
+		t.Fatal("nothing drawn to begin with")
+	}
+
+	m.Update(key("?")) // help screen: draws nothing of its own
+	if m.screen != screenHelp {
+		t.Fatalf("screen = %v, want the help screen", m.screen)
+	}
+	if m.kittyShown != "" {
+		t.Error("the grid's images are still recorded as drawn")
+	}
+}
+
+// With block art the grid draws its own cells and nothing goes on the graphics
+// layer.
+func TestSyncGridPreview_BlocksMode(t *testing.T) {
+	m := gridModel(t, 6)
+	m.cfg.ListPreviewMode = config.PreviewBlocks
+
+	if cmd := m.syncGridPreview(); cmd != nil {
+		t.Error("drew Kitty images although list_preview is blocks")
+	}
+	if len(m.gridPlacements()) == 0 {
+		t.Error("gridPlacements is about geometry and should not depend on the mode")
 	}
 }

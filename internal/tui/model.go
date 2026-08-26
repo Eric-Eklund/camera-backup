@@ -112,12 +112,10 @@ type Model struct {
 	// installed, so the panels can say why instead of showing a blank box.
 	rawToolMissing bool
 	kitty          bool // terminal supports Kitty Graphics Protocol
-	// kittyShown is the file whose image is currently drawn over the Info
-	// panel, with the cell rectangle it was drawn into. Redrawing only when
-	// one of them changes keeps a held-down j from clearing and re-sending an
-	// image on every row.
+	// kittyShown describes what the terminal is currently showing: which
+	// files, at which cells. Redrawing only when that string changes keeps a
+	// held-down j from clearing and re-sending images on every row.
 	kittyShown string
-	kittyRect  [4]int
 	prevScreen Screen
 	helpReturn Screen // screen to return to when help closes
 	helpOffset int    // first visible help line; the reference outgrows short terminals
@@ -223,11 +221,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		before := m.screen
 		model, cmd := m.handleKey(msg)
-		// Anything drawn over the Info panel belongs to the main screen only;
-		// catching the transition here covers every key that leaves it.
-		if m.kittyShown != "" && m.screen != before && m.screen != screenMain {
-			m.kittyShown = ""
-			cmd = tea.Batch(cmd, kittyClearCmd())
+		// Every screen change is a change to what belongs on the graphics
+		// layer — a different set of images, or none. Catching it here covers
+		// every key that moves between screens.
+		if m.screen != before {
+			cmd = tea.Batch(cmd, m.kittySync())
 		}
 		return model, cmd
 
@@ -419,12 +417,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.kittyPreviewCmd(msg.img)
 			}
 		}
-		// On the main screen the same image goes into the Info panel, once it
-		// has finished loading.
-		if m.screen == screenMain {
+		// On the main screen the same image goes into the Info panel, and on
+		// the grid into its cell, once it has finished loading.
+		switch m.screen {
+		case screenMain:
 			if f := m.currentFile(); f != nil && f.AbsPath == msg.file {
 				return m, m.syncInfoPreview()
 			}
+		case screenGrid:
+			return m, m.syncGridPreview()
 		}
 	}
 
@@ -460,6 +461,27 @@ func (m *Model) kittyList() bool {
 	return false
 }
 
+// kittySync draws what the current screen wants on the graphics layer, or
+// takes away what is left over from the one before it.
+func (m *Model) kittySync() tea.Cmd {
+	switch m.screen {
+	case screenMain:
+		return m.syncInfoPreview()
+	case screenGrid:
+		return m.syncGridPreview()
+	}
+	return m.kittyForget()
+}
+
+// kittyForget clears the graphics layer if anything is on it.
+func (m *Model) kittyForget() tea.Cmd {
+	if m.kittyShown == "" {
+		return nil
+	}
+	m.kittyShown = ""
+	return kittyClearCmd()
+}
+
 // syncInfoPreview keeps the image over the Info panel in step with the cursor:
 // it draws the focused file's thumbnail, moves it when the layout changes, and
 // takes it away when the cursor lands on something that has no picture — a
@@ -478,19 +500,79 @@ func (m *Model) syncInfoPreview() tea.Cmd {
 	}
 	cols, rows, row, col, ok := m.infoPreviewRect()
 	if path == "" || !ok {
-		if m.kittyShown == "" {
-			return nil
-		}
-		m.kittyShown = ""
-		return kittyClearCmd()
+		return m.kittyForget()
 	}
 
-	rect := [4]int{cols, rows, row, col}
-	if m.kittyShown == path && m.kittyRect == rect {
+	sig := fmt.Sprintf("info|%s|%d,%d,%d,%d", path, cols, rows, row, col)
+	if m.kittyShown == sig {
 		return nil // already on screen, in the right place
 	}
-	m.kittyShown, m.kittyRect = path, rect
+	m.kittyShown = sig
 	return kittyDrawCmd(img, cols, rows, row, col)
+}
+
+// syncGridPreview draws the thumbnails of the grid's visible window as real
+// images. The grid is the screen that exists for looking at photographs, so a
+// pixel per terminal column is felt there more than anywhere else.
+func (m *Model) syncGridPreview() tea.Cmd {
+	if !m.kittyList() || m.screen != screenGrid {
+		return nil
+	}
+	places := m.gridPlacements()
+	if len(places) == 0 {
+		return m.kittyForget()
+	}
+
+	var sig strings.Builder
+	sig.WriteString("grid")
+	for _, p := range places {
+		fmt.Fprintf(&sig, "|%s@%d,%d,%d,%d", p.path, p.cols, p.rows, p.row, p.col)
+	}
+	if m.kittyShown == sig.String() {
+		return nil
+	}
+	m.kittyShown = sig.String()
+	return kittyDrawGridCmd(places)
+}
+
+// gridPlacements lists where each loaded thumbnail of the visible window goes,
+// in 1-indexed terminal cells. renderGrid leaves exactly these cells blank, so
+// the two have to agree on which files are drawn as images.
+func (m *Model) gridPlacements() []kittyPlacement {
+	files := m.dayFiles(m.gridYear, m.gridMonth, m.gridDay)
+	cols := m.gridCols()
+	if cols < 1 || len(files) == 0 {
+		return nil
+	}
+	cellW := (m.width - 2) / cols
+	if cellW < 6 {
+		return nil
+	}
+	start := m.gridOffset * cols
+	end := (m.gridOffset + m.gridVisibleRows()) * cols
+	if end > len(files) {
+		end = len(files)
+	}
+
+	var out []kittyPlacement
+	for i := start; i < end && i >= 0; i++ {
+		img, ok := m.thumbCache[files[i].AbsPath]
+		if !ok || img == nil {
+			continue // still loading, or nothing to show: the box stays
+		}
+		rowIdx, colIdx := (i-start)/cols, (i-start)%cols
+		out = append(out, kittyPlacement{
+			img:  img,
+			path: files[i].AbsPath,
+			cols: cellW - 2,
+			rows: gridThumbH,
+			// Row 1 is the panel's top border; each grid row is a thumbnail
+			// plus its label. Column 1 is the border as well.
+			row: 2 + rowIdx*(gridThumbH+1),
+			col: 2 + colIdx*cellW,
+		})
+	}
+	return out
 }
 
 // infoPreviewRect is where the Info panel's preview sits, in 1-indexed
@@ -1297,7 +1379,9 @@ func (m *Model) loadThumbsForGridWindow() tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	}
-	return tea.Batch(cmds...)
+	// Every scroll and every entry into the grid comes through here, which
+	// makes it the place to keep the drawn images in step with the window.
+	return tea.Batch(append(cmds, m.syncGridPreview())...)
 }
 
 func (m *Model) handlePreviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

@@ -240,7 +240,9 @@ copy/sync/verify with live parallel progress bars.
 - `z` folds the tree back to the list of years, `Z` unfolds it again, and `f`
   folds everything except the date under the cursor
 - `g` opens a scrollable thumbnail grid for a date group — thumbnails load as
-  you scroll, and `y` starts a copy directly from the grid
+  you scroll, and `y` starts a copy directly from the grid. Where the terminal
+  speaks the Kitty graphics protocol the grid shows real images rather than
+  block art, following `list_preview` like the Info panel does
 - Copies show per-file progress bars plus overall throughput and ETA;
   `q`/`esc` cancels gracefully (files in progress finish, the queue stops)
 - `?` opens a help screen with all keybindings, `v` runs verify, `q` quits

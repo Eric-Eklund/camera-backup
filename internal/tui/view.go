@@ -549,9 +549,16 @@ func (m *Model) renderGrid() string {
 			label := prefix + truncate(name, thumbCellW-3)
 
 			var art string
-			if img, ok := m.thumbCache[f.AbsPath]; ok && img != nil {
+			img, loaded := m.thumbCache[f.AbsPath]
+			switch {
+			case loaded && img != nil && m.kittyList():
+				// gridPlacements draws over exactly these cells once the frame
+				// is out; leaving them blank keeps block art from showing
+				// through the image.
+				art = strings.TrimRight(strings.Repeat(strings.Repeat(" ", thumbCellW-2)+"\n", gridThumbH), "\n")
+			case loaded && img != nil:
 				art = preview.BlockArt(img, thumbCellW-2, gridThumbH)
-			} else {
+			default:
 				// Placeholder box.
 				art = strings.TrimRight(
 					strings.Repeat(styleDim.Render(strings.Repeat("░", thumbCellW-2))+"\n", gridThumbH), "\n")
