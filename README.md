@@ -193,6 +193,32 @@ the authority (the card, or the SSD when no card is connected), so verifying one
 card confirms that card's photos, not the whole NAS. And it only sees extensions
 listed in `file_extensions` — the same blind spot `status` and `copy` have.
 
+### `camera-backup devices`
+
+Lists the filesystems mounted right now — card readers, USB drives, internal
+disks and network shares — so the mount point of a new card can be copied into
+`config.toml` instead of hunted for with `lsblk`:
+
+```
+  Mounted devices
+  ────────────────────────────────────────────────────────────────────────
+  ● CAMERA-CARD (DCIM)   removable  /run/media/eric/CAMERA-CARD   46.1 GB free
+    EXT-SSD              removable  /run/media/eric/EXT-SSD      412.0 GB free
+  ○ NIKON-D850           removable  /run/media/eric/NIKON-D850    59.5 GB free
+    photos               network    /mnt/nas                       2.1 TB free
+    /                    internal   /                             94.3 GB free
+
+  ● current source   ○ listed in config.toml
+```
+
+Removable devices come first, and a device holding a `DCIM` directory — a card
+straight out of a camera — comes first of all. The device currently acting as
+the source is marked `●`, the other devices named in `config.toml` `○`.
+
+Discovery reads `/proc/self/mountinfo` and `/sys/class/block`; it is Linux-only,
+like the rest of the tool. The TUI shows the same list on its device screen
+(`d`), where a device can be picked outright instead of copied by hand.
+
 ### `camera-backup tui`
 
 Interactive terminal UI wrapping all commands. Shows device availability, a
@@ -203,6 +229,13 @@ copy/sync/verify with live parallel progress bars.
 - `j/k` or arrows navigate, `Enter` expands groups or previews a file
 - `space` selects files (or whole groups), `a` selects all — `y` then copies
   only the selection (or everything when nothing is selected)
+- `h`/`l` (or `←`/`→`) walk the tree: `l` opens a date group and steps into it,
+  `h` closes it and steps back out — from a file, `h` closes the day it sits in
+  and leaves the cursor there
+- `[` / `]` jump between date groups without stepping over every frame — `[`
+  from inside a day lands on that day's own row
+- `z` folds the tree back to the list of years, `Z` unfolds it again, and `f`
+  folds everything except the date under the cursor
 - `g` opens a scrollable thumbnail grid for a date group — thumbnails load as
   you scroll, and `y` starts a copy directly from the grid
 - Copies show per-file progress bars plus overall throughput and ETA;
@@ -212,12 +245,51 @@ copy/sync/verify with live parallel progress bars.
   (optional dependency) reading whichever preview the file embeds;
   full-screen previews use the Kitty Graphics Protocol in Ghostty/Kitty
 - `c` opens a **settings screen** that edits config.toml in place — see below
+- `d` opens a **device screen** listing everything mounted, so a different card
+  or drive can be picked as the source mid-session — see below
 - Devices are watched — plugging in the SD card (or any `extra_sources` device)
   refreshes the view automatically
 - Copies to the NAS honour `nas_write_timeout_seconds` (a hung mount fails the
   file, not the batch) and `nas_sync_order` from config.toml
 - With `direct_to_nas = true` the SSD column and tab disappear, the device
   header reads `Source → NAS`, and `y` dumps straight to the NAS (verified)
+
+#### Device screen (`d`)
+
+Swapping cards or drives normally means editing `source` in `config.toml` —
+except when the new card happens to carry the same volume label as the old one
+and lands on the same mount point. `d` removes the guesswork:
+
+```
+╭─ Devices ──────────────────────────────────────────────────────────────╮
+│      DEVICE             TYPE        MOUNT POINT              FREE      │
+│  ▶ ● CAMERA-CARD DCIM  removable   /run/media/eric/CAMERA…  46.1 GB fr…│
+│    ○ EXT-SSD           removable   /run/media/eric/EXT-SSD  412.0 GB f…│
+│    ○ photos            network     /mnt/nas                   2.1 TB f…│
+│    ○ /                 internal    /                         94.3 GB f…│
+│                                                                        │
+│  /run/media/eric/CAMERA-CARD  ← /dev/sdb1 (vfat)                       │
+│                                                                        │
+│  [enter] use for this session · [s] also save to config.toml           │
+╰────────────────────────────────────────────────────────────────────────╯
+ [j/k] move  [enter] use as source  [s] save to config.toml  [r] refresh
+```
+
+- **`enter` swaps the source immediately.** The picked device becomes the
+  source for this session and a fresh scan runs against the NAS — and the local
+  SSD when it is in use — so the file tree, the tab counts and the ✔/✘ columns
+  describe the new card within a second. `config.toml` is not touched: a card
+  swapped mid-afternoon is a session choice, and the configured devices are
+  still there when it comes out.
+- **`s` also writes it to `config.toml`** as `source`, for the reader that is
+  always in the same slot. The path `source` held moves into `extra_sources`
+  rather than being dropped.
+- The device in use is marked `●`, and the list opens with the cursor on it, so
+  `enter` on an untouched list changes nothing.
+- Plugging a device in or pulling one out while the screen is open refreshes the
+  list by itself; `r` rescans on demand.
+- The settings screen has the same list: `d` on **Source device** or **Extra
+  sources** fills that field with a path from it instead of typing one.
 
 #### Settings screen (`c`)
 
@@ -237,7 +309,7 @@ the transfer order:
 │  direct_to_nas — bypass the local SSD — dump straight to the NAS       │
 │  Unsaved changes                                                       │
 ╰────────────────────────────────────────────────────────────────────────╯
- [j/k] move  [enter] edit/toggle  [s] save  [r] reload  [esc] back
+ [j/k] move  [enter] edit/toggle  [d] devices  [s] save  [r] reload  [esc] back
 ```
 
 - `j/k` moves, `enter` (or `space`) edits a path, flips a toggle, or cycles an
@@ -258,7 +330,7 @@ the transfer order:
 Saving is a **surgical rewrite** of config.toml: each key is updated on the line
 where it already sits, so your comments, ordering and any keys this tool does
 not manage survive untouched. Keys the file did not have are appended under an
-`# Added by the settings screen` heading. The write is atomic, so an interrupted
+`# Added by camera-backup` heading. The write is atomic, so an interrupted
 save cannot leave a truncated config.
 
 Optional keys are written as their effective values — after the first save the
@@ -273,7 +345,9 @@ Copy `config-template.toml` to `config.toml` next to the binary (or pass
 local paths stay out of version control.
 
 Everything below can also be edited from the TUI's settings screen (`c`) instead
-of by hand — see [Settings screen](#settings-screen-c).
+of by hand — see [Settings screen](#settings-screen-c). To find the mount point
+of a card or drive, run `camera-backup devices` or pick it from the TUI's device
+screen (`d`) — see [Device screen](#device-screen-d).
 
 ```toml
 source     = "/media/eric/NIKON"      # Camera / memory card (mount point)
@@ -334,7 +408,9 @@ direct_to_nas = true
 - **Multiple source devices.** The source is the first path in
   `source` + `extra_sources` that is actually mounted, so whichever device you
   plug in becomes the source. Nothing else needs to change between a card and
-  an external drive.
+  an external drive. A device that is in neither list — a card whose label puts
+  it somewhere new — is picked from the TUI's device screen (`d`) without
+  editing anything.
 - **Always verified.** Direct copies are SHA256-verified, because the NAS copy
   is the only copy. If a file fails, the run says so and tells you not to format
   the card.
@@ -505,6 +581,7 @@ camera-backup/
 │   └── main.go              # Entry point, subcommands, space check
 ├── internal/
 │   ├── config/              # TOML loading, extension matching, worker counts
+│   ├── devices/             # Mounted-device discovery (mountinfo + sysfs)
 │   ├── scan/                # File scanning and comparison
 │   ├── checksum/            # SHA256 calculation
 │   ├── copyop/              # Copy with progress + verification (serial + parallel)

@@ -122,7 +122,7 @@ func applyValues(content string, values []keyValue) string {
 	if !strings.HasSuffix(out, "\n") {
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\n# Added by the settings screen\n")
+	sb.WriteString("\n# Added by camera-backup\n")
 	for _, kv := range appended {
 		sb.WriteString(kv.key + " = " + kv.value + "\n")
 	}

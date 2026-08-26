@@ -35,12 +35,13 @@ Three-stage incremental backup pipeline: **Camera → SSD → NAS**, plus a
 **direct Source → NAS** path that bypasses the local SSD (`dump`, or
 `direct_to_nas = true`).
 
-Six subcommands (Cobra CLI):
+Seven subcommands (Cobra CLI):
 - `status` — scans all three destinations and shows missing file counts + free space
 - `copy` — Camera→SSD (CopyAndVerify) then SSD→NAS (fast Copy); runs `runDirect` instead when `direct_to_nas` is set
 - `dump` — Source→NAS directly (CopyAndVerify), no local SSD; same `--videos-only/-v`, `--photos-only/-p` and `--order` flags as `sync`. Always available, regardless of `direct_to_nas`
 - `sync` — SSD→NAS only, no camera required; `--videos-only/-v` and `--photos-only/-p` filter by category (mutually exclusive); `--order=size-asc` sorts the batch smallest-first; default order comes from `nas_sync_order` (videos first when unset)
 - `verify` — deep SHA256 check; uses camera as authority, falls back to SSD if camera absent
+- `devices` — lists mounted filesystems that could be a source, marking the active one
 - `tui` — interactive bubbletea TUI wrapping all of the above with parallel copy workers
 
 **Package responsibilities:**
@@ -48,7 +49,8 @@ Six subcommands (Cobra CLI):
 | Package | Role |
 |---|---|
 | `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` + `runDirect()` orchestration, logging init |
-| `internal/config` | TOML loading + `Validate()` + `Save()` (comment-preserving write-back), extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SSDInUse()` |
+| `internal/config` | TOML loading + `Validate()` + `Save()` (comment-preserving write-back), extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SetSourceOverride()`, `SSDInUse()` |
+| `internal/devices` | Linux mounted-device discovery (`/proc/self/mountinfo` + `/sys/class/block`) for the source picker |
 | `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
 | `internal/checksum` | SHA256 with optional progress writer |
@@ -67,6 +69,33 @@ downstream — `status.Compute`, `verify`, `runCopy`, `runDirect` — resolves t
 source through it rather than reading `cfg.Source`, so plugging in either a card
 reader or an external drive just works. The TUI's fsnotify watcher watches the
 parent of every candidate.
+
+That list only helps for a device whose mount point is already written down. A
+card's mount point is `/run/media/<user>/<VOLUME-LABEL>`, so a card with a label
+nobody has seen before lands somewhere the config does not name — which is what
+`internal/devices` and the TUI's device screen are for.
+
+- `devices.List()` parses `/proc/self/mountinfo` (not `/proc/mounts`: mount
+  points are named after volume labels, which can contain spaces) and keeps
+  only an **allowlist** of real filesystems — pseudo filesystems (proc, sysfs,
+  cgroup, overlay, every snap's squashfs) are never where photographs live, and
+  new ones keep appearing, so a denylist would rot.
+- How a device is attached comes from sysfs: the disk's `removable` flag, or
+  failing that the bus in its resolved `/sys/devices` path (`/usb`,
+  `/mmc_host/` — a PCIe SD slot reports `removable = 0`).
+- Free space and the `DCIM` probe both touch the filesystem, which a dead
+  network mount can block on indefinitely. Each device is therefore probed in
+  its own goroutine behind a 2 s deadline and listed without sizes if it misses
+  it — the picker must not hang on an unrelated share.
+- Ordering is the picker's whole value: DCIM first, then anything mounted under
+  `/run/media` or `/media` (the desktop mounted it for this session), then
+  removable, network, and fixed disks.
+- `config.SetSourceOverride()` is how a picked device takes effect: it goes in
+  front of `SourceCandidates()` for this run only. It is deliberately **not** a
+  TOML key — swapping cards several times an afternoon must not rewrite
+  config.toml — and it still falls back to the configured devices when the
+  picked one is unplugged. Saving the settings screen clears it, since
+  config.toml then answers the same question explicitly.
 
 ### Direct Source → NAS mode
 
@@ -228,15 +257,40 @@ Source files whose modtime is within `scan.StableAge` (10 s) of the scan are tre
 - `q`/`esc` on the progress screen cancels gracefully via `context`: files being copied finish (destination never holds partials), queued tasks don't start, cancelled tasks are not counted as failures; `ctrl+c` is a hard quit
 - The progress screen re-renders twice a second (`progressTickCmd`) so per-file speeds stay live; the overall line shows total throughput and ETA
 - `statusReadyMsg`/`deviceChangedMsg` are ignored outside the loading/main screens so operations are never interrupted visually
+- `h`/`l` (and `←`/`→`) walk the date tree: `enterNode` opens a group or steps to its first child (a file opens the preview), `leaveNode` closes an open group where it stands, and otherwise moves to the parent and closes that — `h` on a file must land on its day, not merely collapse in place. `parentIndex` finds the parent by scanning the flattened list upwards for the nearest lower level
+- `[`/`]` jump between level-2 (date) rows; `z`/`Z` fold the whole tree shut/open and `f` folds everything but the current date. All three go through `relocate`, which puts the cursor back on the row it was on — or its nearest still-visible ancestor, so a fold never dumps the user at row 0
 - Selection (`space`/`a`) filters what `y` copies; empty selection = copy everything. `y` also works from the grid view
 - Grid view scrolls: `gridOffset` + `gridScrollToCursor()` keep the cursor row visible; thumbnails load incrementally for the visible window plus one lookahead row (no fixed cap)
 - `?` opens the help screen (from main and grid); the Files panel title shows the visible row range (`Files 28–53/68`) when the tree overflows
+- The help screen drops the blank lines between sections when they do not fit and scrolls with `j`/`k` beyond that (`helpBody`/`helpWindow`) — it has no room to lose a keybinding silently, and it outgrew 40 rows once already
 - Worker counts come from `ssd_workers`/`nas_workers` in config.toml (defaults 3/1); NAS copies also honour `nas_write_timeout_seconds` and `nas_sync_order`. The write timeout is per-destination, not per-mode: pass it for any copy landing on the NAS (including verified direct dumps) and 0 for local Camera→SSD copies
 - All copy batches are launched through `Model.launchBatch` (progress reset, screen switch, worker pool + drain wiring) — add new modes there rather than duplicating the plumbing
 - Kitty graphics used for full-screen preview when `KittySupported()` (Ghostty/Kitty); block-art fallback otherwise; RAW previews need exiftool in PATH
 - RAW previews come from whichever embedded image a file actually has. **Nikon NEF has no `ThumbnailImage`** — asking exiftool for that tag alone returns zero bytes, which is why NEF thumbnails were blank in both the list and the grid. `preview.Thumbnail` tries `PreviewImage` → `ThumbnailImage` → `JpgFromRaw` → `ThumbnailTIFF` (small first, so one exiftool call suffices for NEF/CR2/ARW); `FullImage` tries the same set largest-first. `ThumbnailTIFF` is why `golang.org/x/image/tiff` is registered as a decoder
 - A failed thumbnail load is cached as nil like an unsupported one — without an entry the view would re-request it on every render. `preview.ErrNoRAWTool` sets `Model.rawToolMissing`, so the empty panel says to install exiftool instead of just `[no preview]`
 - The date tree, the detail panel and the preview footer all show `DateTaken()`, so what the TUI groups by matches where `copy` will actually put the file; a fallback to the modtime is marked `(file date)`
+
+### Device screen
+
+`d` on the main screen opens `screenDevices` (`internal/tui/devices.go` for the
+state and actions, `renderDevices` in view.go for the rendering). The same
+screen has two jobs, told apart by `pickerMode`:
+
+- `pickerSwap` (from the main screen): `enter` calls `useDevice`, which sets the
+  source override, clears the selection (it pointed at the previous device's
+  files), restarts the watcher and issues `statusScanCmd` — that rescan is what
+  compares the new card against the NAS and, when `SSDInUse()`, the SSD. `s`
+  additionally writes the device to config.toml as `source`, moving the previous
+  `source` into `extra_sources` rather than dropping it.
+- `pickerField` (from the settings screen's `d`, on the source fields only):
+  `enter` fills that field via `applyPickedPath` and returns to the form, where
+  the value is saved like any typed one. Destination roots are excluded — a NAS
+  or SSD root is a fixed mount point that outlives any one card.
+
+`statusReadyMsg` and `deviceChangedMsg` are accepted on `screenDevices` (as on
+`screenSettings`) and must not switch the screen: the picker stays put after a
+save, and a device event refreshes the list — plugging a card in while the
+picker is open is exactly the case it exists for.
 
 ### Settings screen
 

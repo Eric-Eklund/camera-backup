@@ -4,6 +4,7 @@ import (
 	"image"
 
 	"github.com/Eric-Eklund/camera-backup/internal/copyop"
+	"github.com/Eric-Eklund/camera-backup/internal/devices"
 	"github.com/Eric-Eklund/camera-backup/internal/status"
 	"github.com/Eric-Eklund/camera-backup/internal/verify"
 )
@@ -59,6 +60,13 @@ type fullImageMsg struct {
 }
 
 type deviceChangedMsg struct{}
+
+// devicesReadyMsg carries the result of a mounted-filesystem scan for the
+// device picker.
+type devicesReadyMsg struct {
+	devs []devices.Device
+	err  error
+}
 
 // progressTickMsg fires periodically while the progress screen is visible so
 // speeds and ETA update even when no copy events arrive.
