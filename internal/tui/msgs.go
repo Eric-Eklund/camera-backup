@@ -41,9 +41,10 @@ type verifyFileMsg struct {
 
 type verifyDoneMsg struct {
 	bad, total int
-	// skipped names configured destinations that were not mounted, so the done
-	// screen never presents an unchecked destination as verified.
-	skipped []string
+	// outcome names what the pass could not look at — unmounted destinations
+	// and unreadable source paths — so the done screen never presents an
+	// unchecked destination, or a file nothing could read, as verified.
+	outcome verify.Outcome
 }
 
 type thumbnailMsg struct {

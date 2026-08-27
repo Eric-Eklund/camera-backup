@@ -84,8 +84,11 @@ type Model struct {
 	// Lowercased dest relpaths present on each device, keyed by category —
 	// lookups go against the file's designated root, matching how the
 	// missing-file computation works.
-	ssdKeys map[string]map[string]bool
-	nasKeys map[string]map[string]bool
+	// Source files still to copy, keyed by AbsPath — the complement of the
+	// ✓SSD/✓NAS columns. Built from status.StatusResult's missing lists so the
+	// markers, the tab counts and the copy itself cannot disagree.
+	missingSSD map[string]bool
+	missingNAS map[string]bool
 
 	// tabs: e.g. ["All (312)", "Missing on SSD (12)", "Missing on NAS (47)"]
 	tabs      []string
@@ -249,14 +252,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = msg.result
-		m.ssdKeys = map[string]map[string]bool{
-			"photos": relPathSet(msg.result.SSDPhotoFiles),
-			"videos": relPathSet(msg.result.SSDVideoFiles),
-		}
-		m.nasKeys = map[string]map[string]bool{
-			"photos": relPathSet(msg.result.NASPhotoFiles),
-			"videos": relPathSet(msg.result.NASVideoFiles),
-		}
+		// Derived from the very lists the copy is built from, rather than from
+		// a second, simpler comparison. A set of destination filenames answers
+		// "is something called that over there?", which is not the question:
+		// it marked a file whose destination copy had a different size as
+		// already backed up, and a file already filed under another date as
+		// missing. The green tick is what a person reads before formatting a
+		// card, so it has to mean exactly what `y` would do.
+		m.missingSSD = absPathSet(msg.result.MissingOnSSD)
+		m.missingNAS = absPathSet(msg.result.MissingOnNAS)
 		m.buildTabs()
 		m.setTab(m.activeTab)
 		if m.screen != screenSettings && m.screen != screenDevices {
@@ -385,20 +389,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case verifyDoneMsg:
 		m.screen = screenDone
-		switch {
-		case msg.bad < 0:
-			m.doneMsg = "Verify failed to run — check the log."
-		case msg.bad == 0 && len(msg.skipped) == 0:
-			m.doneMsg = fmt.Sprintf("All %d files verified OK.", msg.total)
-		case msg.bad == 0:
-			m.doneMsg = fmt.Sprintf("All %d files verified OK against what was checked.\nNot checked: %s",
-				msg.total, strings.Join(msg.skipped, ", "))
-		default:
-			m.doneMsg = fmt.Sprintf("%d / %d files have issues.", msg.bad, msg.total)
-			if len(msg.skipped) > 0 {
-				m.doneMsg += "\nNot checked: " + strings.Join(msg.skipped, ", ")
-			}
-		}
+		m.doneMsg = verifyDoneText(msg)
 
 	case thumbnailMsg:
 		// Cache the failure as well as the success: without an entry the view
@@ -1958,12 +1949,42 @@ func progressBar(width int, done, total int) string {
 }
 
 // relPathSet builds a lowercase relpath lookup set from scanned files.
-func relPathSet(files []scan.FileInfo) map[string]bool {
+// absPathSet indexes files by absolute path, which is unique per source file
+// and survives the date-path transform the destination applies.
+func absPathSet(files []scan.FileInfo) map[string]bool {
 	set := make(map[string]bool, len(files))
 	for _, f := range files {
-		set[strings.ToLower(f.RelPath)] = true
+		set[f.AbsPath] = true
 	}
 	return set
+}
+
+// verifyDoneText renders the verify result for the done screen.
+//
+// It is a plain function of the message so the wording can be tested directly:
+// the whole point of these lines is that a pass which could not look at
+// everything never reads as a clean one, and that is a property of the text.
+func verifyDoneText(msg verifyDoneMsg) string {
+	if msg.bad < 0 {
+		return "Verify failed to run — check the log."
+	}
+	var out string
+	switch {
+	case msg.bad == 0 && msg.outcome.Clean():
+		out = fmt.Sprintf("All %d files verified OK.", msg.total)
+	case msg.bad == 0:
+		out = fmt.Sprintf("All %d files verified OK against what could be checked.", msg.total)
+	default:
+		out = fmt.Sprintf("%d / %d files have issues.", msg.bad, msg.total)
+	}
+	if len(msg.outcome.UnmountedRoots) > 0 {
+		out += "\nNot checked: " + strings.Join(msg.outcome.UnmountedRoots, ", ")
+	}
+	if n := len(msg.outcome.Unreadable); n > 0 {
+		out += fmt.Sprintf("\n%d source path(s) could NOT be read — those files are not backed up. Do not format the card:\n  %s",
+			n, strings.Join(scan.Paths(msg.outcome.Unreadable), "\n  "))
+	}
+	return out
 }
 
 // skippedNote formats the "N skipped" suffix for done messages, or "" when

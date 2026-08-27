@@ -43,8 +43,10 @@ video_extensions = [".MOV", ".MP4"] # these route to the videos destination; eve
 #ssd_workers = 3 # camera → SSD (default 3)
 #nas_workers = 1 # SSD → NAS   (default 1)
 
-# Per-file write timeout for SSD → NAS copies (optional, default 60) —
-# guards against hung network mounts; see "Recommended NAS mount options" in README
+# Stall timeout for NAS copies (optional, default 60) — how long the share may
+# go without accepting a single byte before that file is given up on. It is not
+# a limit on how long a file may take, so a large video on a slow link is safe;
+# see "Recommended NAS mount options" in the README.
 #nas_write_timeout_seconds = 60
 
 # How the TUI's Info panel draws the focused photograph (optional):

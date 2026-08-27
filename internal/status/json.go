@@ -74,6 +74,12 @@ type Counts struct {
 	// Unstable counts source files skipped because they were written moments
 	// ago and may still be in flight.
 	Unstable int `json:"unstable"`
+	// Unreadable counts paths on the source this scan could not open. Unlike
+	// every other number here it does not describe files the scan looked at —
+	// it says that source_files, and both missing counts, cover less than the
+	// whole device. Anything above zero means this report cannot be read as a
+	// complete picture, however encouraging the other counts look.
+	Unreadable int `json:"unreadable"`
 }
 
 // ByteCounts mirror Counts in bytes, for a progress figure that means
@@ -108,6 +114,7 @@ func NewReport(cfg *config.Config, r *StatusResult, now time.Time) Report {
 		Counts: Counts{
 			SourceFiles: len(r.CameraFiles),
 			Unstable:    r.CameraUnstable,
+			Unreadable:  len(r.SourceUnreadable),
 		},
 		Bytes: ByteCounts{SourceFiles: totalSize(r.CameraFiles)},
 	}

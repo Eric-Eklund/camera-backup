@@ -121,7 +121,7 @@ func BenchmarkWalkSource(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		files, err := WalkSource(dir, exts)
+		files, _, err := WalkSource(dir, exts)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -139,7 +139,7 @@ func BenchmarkWalk(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := Walk(dir, exts); err != nil {
+		if _, _, err := Walk(dir, exts); err != nil {
 			b.Fatal(err)
 		}
 	}

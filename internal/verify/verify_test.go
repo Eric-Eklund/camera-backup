@@ -208,7 +208,7 @@ func runFull(t *testing.T, cfg *config.Config) (map[string][]string, []string) {
 	t.Helper()
 	logger := log.New(io.Discard, "", 0)
 	issues := map[string][]string{}
-	skipped, err := verify.RunWithCallback(cfg, logger, func(done, total int, r verify.FileResult) {
+	outcome, err := verify.RunWithCallback(cfg, logger, func(done, total int, r verify.FileResult) {
 		if len(r.Issues) > 0 {
 			issues[r.RelPath] = r.Issues
 		}
@@ -216,7 +216,7 @@ func runFull(t *testing.T, cfg *config.Config) (map[string][]string, []string) {
 	if err != nil {
 		t.Fatalf("RunWithCallback: %v", err)
 	}
-	return issues, skipped
+	return issues, outcome.UnmountedRoots
 }
 
 // TestVerify_ReportsUnmountedDestination is the honesty guard: a pass that never
@@ -479,7 +479,7 @@ func TestCopyAndVerifyAgree(t *testing.T) {
 			tc.place(t, ssd)
 
 			// What copy would do.
-			srcFiles, err := scan.WalkSource(cam, cfg.NormalisedExtensions())
+			srcFiles, _, err := scan.WalkSource(cam, cfg.NormalisedExtensions())
 			if err != nil {
 				t.Fatal(err)
 			}

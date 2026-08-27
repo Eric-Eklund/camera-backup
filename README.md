@@ -48,6 +48,14 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
   `direct_to_nas = true`) copies the card straight to the NAS instead — those
   copies are always SHA256-verified, because the NAS copy is then the only copy
 - `copy`, `dump` and `sync` check available disk space before starting and abort if there is not enough room
+- **A path on the card that cannot be read is reported, never skipped in
+  silence.** The scan carries on so everything reachable is still copied, but
+  the run says so loudly and **exits non-zero** — a directory the tool could not
+  open holds photographs nothing has backed up, and that must never look like a
+  finished backup
+- **Every command exits non-zero when files failed.** That includes `sync` and
+  the SSD → NAS half of `copy`, so a script or a timer chaining on success
+  cannot mistake a partial run for a complete one
 
 ---
 
@@ -82,6 +90,18 @@ that both number a frame `DSC_0001` are never confused with each other. Use
 
 If a destination is not connected it shows as `not available` in red.
 
+If part of the card cannot be read — a permission problem, or the I/O errors a
+failing card starts giving — the paths are listed in red and counted separately.
+Those files are not "missing" and not "still being written": they are files this
+scan knows nothing about, so every other number on the screen describes less
+than the whole device.
+
+```
+  ❌  1 path(s) on the source could NOT be read — this run did not see the whole device:
+      /run/media/eric/CARD/DCIM/101NIKON: permission denied
+      Files under those paths are NOT backed up. Do not format the card.
+```
+
 #### `--json`
 
 The same scan as a single JSON object on stdout, for a status bar or a cron job:
@@ -98,10 +118,16 @@ camera-backup status --json
   "source":  { "path": "/run/media/eric/CAMERA-CARD", "available": true, "free_bytes": 48318382080 },
   "ssd":     { "configured": true, "in_use": true, "merged": false, "photos": {...}, "videos": {...} },
   "nas":     { "configured": true, "in_use": true, "merged": false, "photos": {...}, "videos": {...} },
-  "counts":  { "source_files": 412, "missing_on_ssd": 0, "missing_on_nas": 118, "unstable": 0 },
+  "counts":  { "source_files": 412, "missing_on_ssd": 0, "missing_on_nas": 118, "unstable": 0, "unreadable": 0 },
   "bytes":   { "source_files": 51539607552, "to_ssd": 0, "to_nas": 41234567890 }
 }
 ```
+
+`unreadable` counts paths on the card the scan could not open. It is the one
+number that does not describe files the scan looked at — anything above zero
+means `source_files` and both missing counts cover less than the whole device,
+so the report cannot be read as a complete picture however encouraging the rest
+of it looks. A panel that only watches `missing_on_nas` should watch this too.
 
 A count this run did not work out is **null**, never zero: `missing_on_ssd` is
 null in direct mode (the SSD is bypassed) and with no device mounted at all.
@@ -163,7 +189,11 @@ Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verificati
   ✅  13 file(s) copied.
 ```
 
-If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly after Phase 1. Run `camera-backup sync` later to push to NAS — files already there are skipped automatically.
+If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly after Phase 1. Run `camera-backup sync` later to push to NAS — files already there are skipped automatically. If files *did* fail to copy, the command exits non-zero.
+
+If part of the card could not be read, everything reachable is still copied —
+those files are worth having — but the run ends on an error rather than on
+"copied and verified", so nothing downstream treats the card as safe to format.
 
 ### `camera-backup dump`
 
@@ -187,8 +217,10 @@ The source device is the first mounted path of `source` / `extra_sources`, so
 one config can serve a card reader and an external drive — see
 [Dumping straight to the NAS](#dumping-straight-to-the-nas).
 
-NAS writes are bounded by `nas_write_timeout_seconds` here too, so a hung mount
-fails that one file instead of the whole run.
+NAS writes are watched by `nas_write_timeout_seconds` here too, so a hung mount
+fails that one file instead of the whole run. It measures how long the share
+goes without accepting a byte, not how long the file takes, so a large video on
+a slow link is never cut short.
 
 `dump` works whether or not `direct_to_nas` is set — the setting only decides
 what `copy` and the TUI do by default.
@@ -285,6 +317,16 @@ stand for something that was never looked at:
   All 47 files verified OK against the destinations that were checked.
   ⚠️  Not checked: NAS photos (/mnt/nas/Photos) — mount and re-run to verify there.
 ```
+
+Paths on the card it could not read are reported the same way, and for the same
+reason: those files were never hashed, so they appear nowhere in the count of
+files that passed.
+
+With `direct_to_nas` the local SSD is **not** treated as a destination, even
+when `ssd_photos`/`ssd_videos` are still set for `sync` to use. Nothing is ever
+written there in direct mode, so expecting copies would report a flawless dump
+as almost entirely broken. With no card mounted, direct mode therefore has no
+authority to verify against and says so.
 
 Two limits worth knowing. Verify is **source-driven**: it checks the files on
 the authority (the card, or the SSD when no card is connected), so verifying one
@@ -473,12 +515,13 @@ video_extensions = [".MOV", ".MP4"]   # these route to the videos destination
 ssd_workers = 3               # camera → SSD (default 3)
 nas_workers = 1               # SSD → NAS   (default 1)
 
-# Per-file write timeout for SSD → NAS copies (optional, default 60)
+# Stall timeout for NAS copies (optional, default 60)
 # Guards against hung network mounts: a hard-mounted NFS/CIFS share blocks
-# forever when the connection drops instead of returning an error. When a
-# file hits this timeout it is counted as failed and the sync moves on to
-# the next file. Applies to both the CLI and the TUI.
-# See "Recommended NAS mount options" below.
+# forever when the connection drops instead of returning an error. This is
+# how long the share may go without accepting a single byte — not how long a
+# file may take — so a 40 GB video on a slow link is never cut short, while a
+# mount that goes quiet fails that one file and the copy moves on.
+# Applies to both the CLI and the TUI. See "Recommended NAS mount options".
 nas_write_timeout_seconds = 60
 
 # How the TUI's Info panel draws the focused photograph (optional):
@@ -570,6 +613,13 @@ mid-flight — which is exactly why this tool never trusts the fast SSD→NAS co
 and `verify` re-hashes everything afterwards. Failed files are simply
 re-copied on the next `sync`.
 
+A note on the stalled write itself: the partial file it leaves behind is
+removed once the mount recovers, but only if this process is still running to
+do it. If the run has already exited, the stub stays until a later run replaces
+it — the real copy then lands beside it as a `_1` variant rather than
+overwriting anything, per the rule that this program never overwrites a file it
+did not create in that same operation.
+
 For **CIFS/SMB**, the equivalent is:
 
 ```
@@ -580,7 +630,10 @@ For **CIFS/SMB**, the equivalent is:
 - `echo_interval=10` — detect a dead server after ~2×10 s of silence
 
 With a hard mount (or the `hard` default), keep `nas_write_timeout_seconds`
-low so a hang costs one timeout per file instead of a frozen terminal.
+low so a hang costs one timeout per file instead of a frozen terminal. Low is
+safe here: the timeout measures silence from the share, not the size of the
+file, so tightening it makes a dead mount fail sooner without putting large
+videos at risk.
 
 ---
 

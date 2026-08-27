@@ -54,7 +54,7 @@ func TestReport_Schema(t *testing.T) {
 	}
 
 	counts := got["counts"].(map[string]any)
-	for _, k := range []string{"source_files", "missing_on_ssd", "missing_on_nas", "unstable"} {
+	for _, k := range []string{"source_files", "missing_on_ssd", "missing_on_nas", "unstable", "unreadable"} {
 		if _, ok := counts[k]; !ok {
 			t.Errorf("counts is missing %q", k)
 		}

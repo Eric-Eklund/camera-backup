@@ -38,6 +38,12 @@ type StatusResult struct {
 	// modtime is within scan.StableAge of now — probably still being written.
 	CameraUnstable int
 
+	// SourceUnreadable lists paths on the source device this scan could not
+	// read. They are not missing files and not unstable ones: they are files
+	// this run knows nothing about, so every count below describes less than
+	// the whole device. Callers must show it.
+	SourceUnreadable []scan.Unreadable
+
 	// Per-root file lists, for lookups against a file's designated root.
 	// For merged roots both slices are the same scan.
 	SSDPhotoFiles []scan.FileInfo
@@ -98,9 +104,12 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 
 	if r.SourceAvail {
 		var err error
-		r.CameraFiles, err = scan.WalkSource(source, exts)
+		r.CameraFiles, r.SourceUnreadable, err = scan.WalkSource(source, exts)
 		if err != nil {
 			return nil, err
+		}
+		for _, u := range r.SourceUnreadable {
+			logger.Printf("UNREADABLE source path %s", u)
 		}
 		var unstable []scan.FileInfo
 		r.CameraFiles, unstable = scan.SplitStable(r.CameraFiles, time.Now(), scan.StableAge)
@@ -108,7 +117,7 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 		if r.CameraUnstable > 0 {
 			logger.Printf("Camera: %d file(s) skipped — modified within %s of scan, possibly still being written", r.CameraUnstable, scan.StableAge)
 		}
-		logger.Printf("Camera: %d files found", len(r.CameraFiles))
+		logger.Printf("Camera: %d files found, %d path(s) unreadable", len(r.CameraFiles), len(r.SourceUnreadable))
 	}
 
 	// Scan destination roots. WalkDual scans a merged root only once.
@@ -219,11 +228,13 @@ func Run(cfg *config.Config, logger *log.Logger) error {
 	if r.CameraUnstable > 0 {
 		ui.Yellow.Printf("  ⚠️  %d camera file(s) skipped — modified moments ago, possibly still being written. Re-run when the card is idle.\n", r.CameraUnstable)
 	}
+	ui.PrintUnreadable(r.SourceUnreadable)
 
-	logger.Printf("status: %d camera files, %d missing from SSD (%s), %d missing from NAS (%s)",
+	logger.Printf("status: %d camera files, %d missing from SSD (%s), %d missing from NAS (%s), %d unreadable",
 		len(r.CameraFiles),
 		len(r.MissingOnSSD), ui.FormatBytes(ssdInfo.ToBytes),
-		len(r.MissingOnNAS), ui.FormatBytes(nasInfo.ToBytes))
+		len(r.MissingOnNAS), ui.FormatBytes(nasInfo.ToBytes),
+		len(r.SourceUnreadable))
 	return nil
 }
 

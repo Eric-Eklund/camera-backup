@@ -385,6 +385,10 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	exts := cfg.NormalisedExtensions()
 	categoryFn := func(f scan.FileInfo) string { return cfg.Category(f.RelPath) }
 
+	// Carried past both phases: whatever the card would not show us decides
+	// the exit status of the whole run, not just of the phase that hit it.
+	var srcUnreadable []scan.Unreadable
+
 	source := cfg.ActiveSource()
 	sourceAvail := isDir(source)
 	ssdPhotosAvail := config.RootAvailable(cfg.SSDPhotos)
@@ -403,10 +407,12 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 		return fmt.Errorf("SSD not accessible at %s or %s", cfg.SSDPhotos, cfg.SSDVideos)
 	} else {
 		phase1Ran = true
-		cameraFiles, err := scan.WalkSource(source, exts)
+		cameraFiles, unreadable, err := scan.WalkSource(source, exts)
 		if err != nil {
 			return err
 		}
+		srcUnreadable = unreadable
+		reportUnreadable(unreadable, logger, "Phase 1:")
 		cameraFiles, unstable := scan.SplitStable(cameraFiles, time.Now(), scan.StableAge)
 		if len(unstable) > 0 {
 			ui.Yellow.Printf("  ⚠️  %d file(s) skipped — modified moments ago, possibly still being written. Re-run when the card is idle.\n", len(unstable))
@@ -465,18 +471,21 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	}
 	if !ui.AskYesNo("  Continue to sync SSD → NAS? [y/n]: ") {
 		logger.Println("Phase 2 skipped: user declined")
-		return nil
+		return incompleteSourceError(srcUnreadable)
 	}
 	ui.PrintSeparator()
 
 	// ── Phase 2: SSD → NAS ────────────────────────────────────────────────────
 	// The path travels with the writer: when opening it before the scan failed,
 	// phase 2 gets its own chance rather than silently publishing nothing.
-	return runSync(cfg, logger, syncOptions{
+	if err := runSync(cfg, logger, syncOptions{
 		order:        cfg.SyncOrder(),
 		progress:     opts.progress,
 		progressPath: opts.progressPath,
-	})
+	}); err != nil {
+		return err
+	}
+	return incompleteSourceError(srcUnreadable)
 }
 
 // runDirect copies files from the source device straight to the NAS, bypassing
@@ -510,10 +519,11 @@ func runDirect(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 			cfg.NASPhotos, cfg.NASVideos)
 	}
 
-	srcFiles, err := scan.WalkSource(source, exts)
+	srcFiles, srcUnreadable, err := scan.WalkSource(source, exts)
 	if err != nil {
 		return err
 	}
+	reportUnreadable(srcUnreadable, logger, "direct:")
 	srcFiles, unstable := scan.SplitStable(srcFiles, time.Now(), scan.StableAge)
 	if len(unstable) > 0 {
 		ui.Yellow.Printf("  ⚠️  %d file(s) skipped — modified moments ago, possibly still being written. Re-run when the device is idle.\n", len(unstable))
@@ -553,7 +563,7 @@ func runDirect(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	if len(tasks) == 0 {
 		ui.Green.Println("\n  NAS is already up to date — nothing to copy.")
 		logger.Println("direct: NAS already up to date")
-		return nil
+		return incompleteSourceError(srcUnreadable)
 	}
 
 	if err := copyop.CheckSpace(tasks); err != nil {
@@ -571,7 +581,7 @@ func runDirect(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 		return fmt.Errorf("%d file(s) failed during Source → NAS", errs)
 	}
 	ui.Green.Printf("  ✅  %d file(s) copied and verified.\n", len(tasks))
-	return nil
+	return incompleteSourceError(srcUnreadable)
 }
 
 // runSync copies files from SSD that are missing on the NAS.
@@ -671,10 +681,42 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	fmt.Println()
 	if errs > 0 {
 		ui.Yellow.Printf("  ⚠️  %d file(s) failed — check the log.\n", errs)
-	} else {
-		ui.Green.Printf("  ✅  %d file(s) copied.\n", len(tasks))
+		// The files that did copy are on the NAS and a re-run skips them, so
+		// this is a partial success — but it exits non-zero all the same.
+		// Phase 1 and dump already do, and anything driving this from a script
+		// or a timer has only the exit status to go on.
+		return fmt.Errorf("%d file(s) failed during SSD → NAS", errs)
 	}
+	ui.Green.Printf("  ✅  %d file(s) copied.\n", len(tasks))
 	return nil
+}
+
+// reportUnreadable prints and logs the source paths a scan could not read.
+// Both channels matter: the terminal warning is what stops someone formatting
+// the card, and the log is where the full list survives past the scrollback.
+func reportUnreadable(unreadable []scan.Unreadable, logger *log.Logger, phase string) {
+	if len(unreadable) == 0 {
+		return
+	}
+	for _, u := range unreadable {
+		logger.Printf("%s UNREADABLE source path %s", phase, u)
+	}
+	ui.PrintUnreadable(unreadable)
+}
+
+// incompleteSourceError turns unread source paths into a non-zero exit status.
+//
+// The copy itself succeeded for every file the scan could see, and those files
+// are worth keeping — so the run finishes rather than aborting. But it must not
+// end looking like a finished backup: a cron job, a shell script or a person
+// reading the last line all take "exit 0" for "the card is safe to format",
+// and under these paths sit photographs nothing has copied.
+func incompleteSourceError(unreadable []scan.Unreadable) error {
+	if len(unreadable) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d source path(s) could not be read (%s) — this backup is incomplete; do not format the card",
+		len(unreadable), strings.Join(scan.Paths(unreadable), ", "))
 }
 
 func isDir(path string) bool {
