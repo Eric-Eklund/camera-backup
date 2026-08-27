@@ -122,17 +122,22 @@ func (l *linuxLister) probeAll(devs []Device) {
 		wg.Add(1)
 		go func(d *Device) {
 			defer wg.Done()
+			// The probe works from its own copy and reads nothing through d.
+			// When it misses the deadline this goroutine returns, but the
+			// probe itself runs on — and by then the caller is compacting and
+			// sorting the very slice d points into.
+			start := *d
 			done := make(chan Device, 1)
 			go func() {
-				probed := *d
-				if fs, err := statfs(d.Path); err == nil {
+				probed := start
+				if fs, err := statfs(probed.Path); err == nil {
 					probed.TotalBytes = fs.total
 					probed.FreeBytes = fs.free
 				}
-				if st, err := os.Stat(d.Path); err == nil && !st.IsDir() {
+				if st, err := os.Stat(probed.Path); err == nil && !st.IsDir() {
 					probed.notDir = true
 				}
-				if st, err := os.Stat(filepath.Join(d.Path, "DCIM")); err == nil && st.IsDir() {
+				if st, err := os.Stat(filepath.Join(probed.Path, "DCIM")); err == nil && st.IsDir() {
 					probed.HasDCIM = true
 				}
 				done <- probed

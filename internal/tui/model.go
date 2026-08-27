@@ -214,9 +214,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// The Info panel moved, so anything drawn over it is in the wrong place.
+		// Every panel moved, so anything drawn over one is in the wrong place.
 		m.kittyShown = ""
-		return m, m.syncInfoPreview()
+		return m, m.kittySync()
 
 	case tea.KeyMsg:
 		before := m.screen
@@ -404,6 +404,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rawToolMissing = true
 		}
 		delete(m.loadingThumb, msg.file)
+		// This is the only message that fills thumbCache, so it is where the
+		// Info panel and the grid learn they have something to draw. Without
+		// it a thumbnail that arrives while the cursor sits still is never
+		// placed, and the reserved rows stay blank until the next keypress.
+		switch m.screen {
+		case screenMain:
+			if f := m.currentFile(); f != nil && f.AbsPath == msg.file {
+				return m, m.syncInfoPreview()
+			}
+		case screenGrid:
+			return m, m.syncGridPreview()
+		}
 
 	case fullImageMsg:
 		m.fullCache[msg.file] = msg.img // nil = no preview available
@@ -416,16 +428,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if f := m.previewFile(); f != nil && f.AbsPath == msg.file {
 				return m, m.kittyPreviewCmd(msg.img)
 			}
-		}
-		// On the main screen the same image goes into the Info panel, and on
-		// the grid into its cell, once it has finished loading.
-		switch m.screen {
-		case screenMain:
-			if f := m.currentFile(); f != nil && f.AbsPath == msg.file {
-				return m, m.syncInfoPreview()
-			}
-		case screenGrid:
-			return m, m.syncGridPreview()
 		}
 	}
 

@@ -97,7 +97,12 @@ func scanDevicesCmd() tea.Cmd {
 // times an afternoon, and the configured devices should still be there when
 // the card comes out.
 func (m *Model) useDevice(d devices.Device) tea.Cmd {
-	m.cfg.SetSourceOverride(d.Path)
+	// A scan or the device watcher may be reading the running config in
+	// another goroutine, so the override goes onto a copy that replaces it —
+	// the same way the settings screen adopts a draft.
+	draft := *m.cfg
+	draft.SetSourceOverride(d.Path)
+	m.cfg = &draft
 	// The previous device's files are gone from the tree the moment the scan
 	// lands, so a selection carried over would silently apply to nothing.
 	m.selected = map[string]bool{}

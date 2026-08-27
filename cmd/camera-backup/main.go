@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -130,24 +131,29 @@ is missing on a bypassed SSD, or anything at all with no device mounted — is
 null rather than zero, so "nothing is missing" cannot be confused with "this
 was never compared".`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := mustLoadConfig(*configPath)
+			if err != nil {
+				return err
+			}
+
+			// --json is built to be polled — the README's own waybar example
+			// runs it every minute. A timestamped log file per invocation
+			// would leave well over a thousand of them a day, so the scan
+			// keeps its notes to itself.
+			if asJSON {
+				r, err := status.Compute(cfg, log.New(io.Discard, "", 0))
+				if err != nil {
+					return err
+				}
+				return status.WriteJSON(cfg, r, cmd.OutOrStdout(), time.Now())
+			}
+
 			logger, cleanup, err := initLogger()
 			if err != nil {
 				return err
 			}
 			defer cleanup()
-
-			cfg, err := mustLoadConfig(*configPath)
-			if err != nil {
-				return err
-			}
-			if !asJSON {
-				return status.Run(cfg, logger)
-			}
-			r, err := status.Compute(cfg, logger)
-			if err != nil {
-				return err
-			}
-			return status.WriteJSON(cfg, r, cmd.OutOrStdout(), time.Now())
+			return status.Run(cfg, logger)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Write the scan to stdout as JSON")
@@ -229,6 +235,10 @@ type syncOptions struct {
 	// progressPath is where --progress-json publishes the state of the running
 	// batch; empty means nothing is published.
 	progressPath string
+	// progress is an already-open document to publish into, set by runCopy so
+	// both of its phases appear as one run. When nil, progressPath is opened
+	// for the single batch that follows.
+	progress *progress.Writer
 }
 
 // resolveOrder fills in the configured default order when --order was omitted
@@ -309,25 +319,51 @@ func newVerifyCmd(configPath *string) *cobra.Command {
 //
 // A failure to publish is reported and otherwise ignored — a status bar that
 // cannot be fed is no reason to stop a backup.
-func observeTo(path, phase string, tasks []copyop.Task, logger *log.Logger) (func(copyop.FileProgress), func()) {
-	if path == "" {
-		return nil, func() {}
-	}
+func observeTo(opts syncOptions, phase string, tasks []copyop.Task, logger *log.Logger) (func(copyop.FileProgress), func()) {
 	var total int64
 	for _, t := range tasks {
 		total += t.Src.Size
 	}
-	w, err := progress.New(path, phase, len(tasks), total)
+
+	// A copy runs two batches into one document, so the writer it opened is
+	// reused and left open — closing it between the phases would tell a reader
+	// the backup had finished with half of it still to come.
+	if w := opts.progress; w != nil {
+		w.StartBatch(phase, len(tasks), total)
+		logger.Printf("progress: %s (%d files)", phase, len(tasks))
+		return w.Observe, func() {}
+	}
+	if opts.progressPath == "" {
+		return nil, func() {}
+	}
+
+	w, err := openProgress(opts.progressPath, phase, logger)
+	if err != nil {
+		return nil, func() {}
+	}
+	w.StartBatch(phase, len(tasks), total)
+	return w.Observe, func() { closeProgress(w, logger) }
+}
+
+// openProgress starts publishing to path. A failure is reported and otherwise
+// ignored — a status bar that cannot be fed is no reason to stop a backup.
+func openProgress(path, phase string, logger *log.Logger) (*progress.Writer, error) {
+	w, err := progress.New(path, phase, 0, 0)
 	if err != nil {
 		ui.Yellow.Printf("  ⚠️  cannot write progress to %s: %v\n", path, err)
 		logger.Printf("progress: %v", err)
-		return nil, func() {}
+		return nil, err
 	}
-	logger.Printf("progress: publishing %s to %s", phase, path)
-	return w.Observe, func() {
-		if err := w.Close(); err != nil {
-			logger.Printf("progress: %v", err)
-		}
+	logger.Printf("progress: publishing to %s", path)
+	return w, nil
+}
+
+func closeProgress(w *progress.Writer, logger *log.Logger) {
+	if w == nil {
+		return
+	}
+	if err := w.Close(); err != nil {
+		logger.Printf("progress: %v", err)
 	}
 }
 
@@ -335,6 +371,15 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	// direct_to_nas replaces the two-phase flow with a single source → NAS pass.
 	if cfg.DirectToNAS {
 		return runDirect(cfg, logger, syncOptions{order: cfg.SyncOrder(), progressPath: opts.progressPath})
+	}
+
+	// One document covers both phases, opened before the scan so a reader sees
+	// the run start rather than waiting for the first file.
+	if opts.progressPath != "" {
+		if w, err := openProgress(opts.progressPath, "scanning", logger); err == nil {
+			opts.progress = w
+			defer closeProgress(w, logger)
+		}
 	}
 
 	exts := cfg.NormalisedExtensions()
@@ -398,7 +443,7 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 				return err
 			}
 			ui.Bold.Printf("\n  Copying %d file(s) to SSD...\n", len(tasks))
-			observe, finish := observeTo(opts.progressPath, "camera→ssd", tasks, logger)
+			observe, finish := observeTo(opts, "camera→ssd", tasks, logger)
 			errs := copyop.RunBatchObserved(tasks, logger, true, 0, observe)
 			finish()
 			fmt.Println()
@@ -425,7 +470,7 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	ui.PrintSeparator()
 
 	// ── Phase 2: SSD → NAS ────────────────────────────────────────────────────
-	return runSync(cfg, logger, syncOptions{order: cfg.SyncOrder(), progressPath: opts.progressPath})
+	return runSync(cfg, logger, syncOptions{order: cfg.SyncOrder(), progress: opts.progress})
 }
 
 // runDirect copies files from the source device straight to the NAS, bypassing
@@ -510,7 +555,7 @@ func runDirect(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	}
 	ui.Bold.Printf("\n  Copying %d file(s) straight to NAS (verified)...\n", len(tasks))
 	logger.Printf("direct source→NAS: %d files, order=%s", len(tasks), opts.order)
-	observe, finish := observeTo(opts.progressPath, "source→nas", tasks, logger)
+	observe, finish := observeTo(opts, "source→nas", tasks, logger)
 	errs := copyop.RunBatchObserved(tasks, logger, true, cfg.NASWriteTimeout(), observe)
 	finish()
 	fmt.Println()
@@ -614,7 +659,7 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 		ui.Bold.Printf("\n  Copying %d file(s) to NAS (videos first)...\n", len(tasks))
 		logger.Println("SSD → NAS")
 	}
-	observe, finish := observeTo(opts.progressPath, "ssd→nas", tasks, logger)
+	observe, finish := observeTo(opts, "ssd→nas", tasks, logger)
 	errs := copyop.RunBatchObserved(tasks, logger, false, cfg.NASWriteTimeout(), observe)
 	finish()
 	fmt.Println()
