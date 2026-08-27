@@ -41,6 +41,10 @@ Typical workflow:
 To skip the local SSD entirely and dump a card or external drive straight to
 the NAS, run "camera-backup dump" — or set direct_to_nas = true in config.toml
 to make that the default for "copy" and the TUI.`,
+		// A failed run is not a usage mistake: printing the help text after
+		// "2 of 7 file(s) failed verification" scrolls the one line that
+		// matters off the screen. The error itself is still printed.
+		SilenceUsage: true,
 	}
 
 	root.PersistentFlags().StringVar(&configPath, "config", "", "Path to config.toml (default: next to binary)")
@@ -608,6 +612,34 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 		return nil
 	}
 
+	// The SSD is the *source* of this comparison, so its roots must exist as
+	// directories — config.RootAvailable's parent-counts rule is for
+	// destinations, where the root is created on first copy. An unmounted SSD
+	// would otherwise scan as empty, every file would look already-synced, and
+	// the run would end on "NAS is already up to date" for an SSD nothing ever
+	// read — the exact lie the exit status exists to prevent.
+	ssdPhotosAvail := isDir(cfg.SSDPhotos)
+	ssdVideosAvail := isDir(cfg.SSDVideos)
+	if !ssdPhotosAvail && !ssdVideosAvail {
+		return fmt.Errorf("SSD not accessible at %s or %s — mount the drive (or run a copy first) and re-run",
+			cfg.SSDPhotos, cfg.SSDVideos)
+	}
+	// One root missing: the other category is still worth syncing, but the run
+	// must not end looking complete — a category the scan never saw is not "up
+	// to date". A category excluded by --videos-only/--photos-only was not part
+	// of this run's job, so its root being absent is not this run's failure.
+	var ssdMissing []string
+	reportMissingRoot := func(cat, root string, avail bool) {
+		if avail || opts.skipsCategory(cat) {
+			return
+		}
+		ui.Yellow.Printf("  ⚠️  SSD %s root not available at %s — %s were not compared or synced.\n", cat, root, cat)
+		logger.Printf("SSD→NAS: SSD %s root unavailable at %s", cat, root)
+		ssdMissing = append(ssdMissing, fmt.Sprintf("%s (%s)", cat, root))
+	}
+	reportMissingRoot("photos", cfg.SSDPhotos, ssdPhotosAvail)
+	reportMissingRoot("videos", cfg.SSDVideos, ssdVideosAvail)
+
 	ssdPhotoFiles, ssdVideoFiles := scan.WalkDual(cfg.SSDPhotos, cfg.SSDVideos, exts)
 	var ssdAll []scan.FileInfo
 	if cfg.SSDMerged() {
@@ -655,7 +687,7 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	if len(tasks) == 0 {
 		ui.Green.Println("\n  NAS is already up to date — nothing to copy.")
 		logger.Println("NAS already up to date")
-		return nil
+		return incompleteSSDError(ssdMissing)
 	}
 
 	if err := copyop.CheckSpace(tasks); err != nil {
@@ -688,7 +720,20 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 		return fmt.Errorf("%d file(s) failed during SSD → NAS", errs)
 	}
 	ui.Green.Printf("  ✅  %d file(s) copied.\n", len(tasks))
-	return nil
+	return incompleteSSDError(ssdMissing)
+}
+
+// incompleteSSDError turns an unavailable SSD source root into a non-zero exit
+// status, the same way incompleteSourceError does for unread card paths. The
+// available category was still synced — those files are worth pushing — but a
+// category whose root the scan never saw has not been compared, and the run
+// must not end reading as a finished sync.
+func incompleteSSDError(missing []string) error {
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("SSD root(s) not available: %s — that part of the SSD was never compared; this sync is incomplete",
+		strings.Join(missing, ", "))
 }
 
 // reportUnreadable prints and logs the source paths a scan could not read.

@@ -375,7 +375,7 @@ video_extensions = [".MOV"]
 // A refused save leaves the original byte-identical. Losing the edit is
 // recoverable; losing the config is not.
 func TestSave_LeavesTheOriginalUntouchedWhenItRefuses(t *testing.T) {
-	original := "source = \"/card\"\nssd_photos = \"/p\"\nssd_videos = \"/v\"\n"
+	original := "source = \"/card\"\nssd_photos = \"/p\"\nssd_videos = \"/v\"\nfile_extensions = [\".NEF\"]\n"
 	path := writeConfig(t, original)
 
 	cfg, err := Load(path)

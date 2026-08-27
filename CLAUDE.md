@@ -342,6 +342,25 @@ during SSD→NAS now return an error, as phase 1 and `dump` always did, and a
 source the scan could only partly read does too (see above). The printed output
 is unchanged; it is the status that had to stop lying.
 
+The same rule reaches two more places:
+
+- **`verify` exits non-zero when any file has issues**, and when part of the
+  source could not be read (`verify.runError`). The summary line is for whoever
+  is watching; the README's monthly cron verify sees only the exit status. An
+  unmounted destination alone stays exit 0 — that is the documented
+  "skipped, not failed" case, and the summary names it.
+- **`sync` requires its SSD source roots to exist as directories** (`isDir`,
+  not `RootAvailable` — parent-counts is a destination rule). An unmounted SSD
+  scans as empty, which used to end the run on "NAS is already up to date" for
+  an SSD nothing ever read. Both roots missing is a hard error; one missing
+  root syncs the other category and exits non-zero (`incompleteSSDError`),
+  unless `--videos-only`/`--photos-only` excluded that category from the job.
+
+**`config.Validate` rejects an empty `file_extensions` list.** A scan that
+matches nothing makes every safety net agree on a backup nobody made: 0 files
+found, 0 missing, "All 0 files verified OK". The TUI's form refuses it at the
+field level; `Validate` is the backstop for a hand-edited config.toml.
+
 - Source files are never modified or deleted
 - Destination files are created with `O_EXCL` — never overwritten
 - Destination modtime is set to source modtime
