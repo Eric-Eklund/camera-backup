@@ -225,7 +225,7 @@ camera-backup copy --progress-json /run/user/1000/camera-backup.json
   "pid": 3574,
   "started_at": "2026-03-25T12:00:00Z",
   "updated_at": "2026-03-25T12:04:31Z",
-  "files":   { "done": 4, "failed": 0, "total": 7 },
+  "files":   { "done": 4, "failed": 0, "total": 7 },   // total is null while scanning
   "bytes":   { "done": 396361728, "total": 424214528 },
   "current": [ { "file": "DCIM/100NIKON/BIG_0001.MOV", "written": 391118848, "size": 419430400 } ],
   "bytes_per_second": 138412032,
@@ -245,9 +245,12 @@ camera-backup copy --progress-json /run/user/1000/camera-backup.json
 - When the batch ends, `running` goes false. A process killed mid-copy leaves
   its last document behind — `pid` and `updated_at` are there so a reader can
   tell that apart from a live copy.
-- A `copy` publishes **both** its phases into one document: `phase` goes from
-  `camera→ssd` to `ssd→nas` and the counters restart, but `running` stays true
-  until the whole run is over.
+- A `copy` publishes **both** its phases into one document: `phase` starts at
+  `scanning`, becomes `camera→ssd` and then `ssd→nas` as the counters restart,
+  but `running` stays true until the whole run is over. **`running` is the only
+  finished signal** — do not compare `files.done` with `files.total`.
+- While the phase is `scanning` the totals are **null**: how much there is to
+  copy is not known yet, and zero would read as "0 of 0 files done".
 - Bytes of a file that failed to copy are not counted — its destination was
   removed, so they are not on the disk. `files.failed` records it instead.
 

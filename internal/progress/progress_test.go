@@ -27,10 +27,11 @@ func read(t *testing.T, path string) progress.State {
 func newWriter(t *testing.T, files int, bytes int64) (*progress.Writer, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "progress.json")
-	w, err := progress.New(path, "camera→ssd", files, bytes)
+	w, err := progress.New(path, "camera→ssd")
 	if err != nil {
 		t.Fatal(err)
 	}
+	w.StartBatch("camera→ssd", files, bytes)
 	return w, path
 }
 
@@ -43,7 +44,7 @@ func TestNew_WritesImmediately(t *testing.T) {
 	if !st.Running {
 		t.Error("running = false before anything was copied")
 	}
-	if st.Files.Total != 3 || st.Bytes.Total != 3000 {
+	if st.Files.Total == nil || *st.Files.Total != 3 || st.Bytes.Total == nil || *st.Bytes.Total != 3000 {
 		t.Errorf("totals = %+v / %+v, want 3 files and 3000 bytes", st.Files, st.Bytes)
 	}
 	if st.PID != os.Getpid() {
@@ -191,7 +192,7 @@ func TestState_TimestampsAreParseable(t *testing.T) {
 }
 
 func TestNew_UnwritablePathReportsError(t *testing.T) {
-	if _, err := progress.New(filepath.Join(t.TempDir(), "nope", "x", "p.json"), "x", 0, 0); err != nil {
+	if _, err := progress.New(filepath.Join(t.TempDir(), "nope", "x", "p.json"), "x"); err != nil {
 		return // a missing parent is created; only a real failure should error
 	}
 }
@@ -228,10 +229,10 @@ func TestStartBatch_KeepsTheDocumentRunning(t *testing.T) {
 	if st.Phase != "ssd→nas" {
 		t.Errorf("phase = %q, want the new one", st.Phase)
 	}
-	if st.Files != (progress.FileCounts{Total: 5}) {
+	if st.Files.Done != 0 || st.Files.Failed != 0 || st.Files.Total == nil || *st.Files.Total != 5 {
 		t.Errorf("files = %+v, want the counters reset with the new total", st.Files)
 	}
-	if st.Bytes.Done != 0 || st.Bytes.Total != 5000 {
+	if st.Bytes.Done != 0 || st.Bytes.Total == nil || *st.Bytes.Total != 5000 {
 		t.Errorf("bytes = %+v, want a fresh batch", st.Bytes)
 	}
 
@@ -240,5 +241,33 @@ func TestStartBatch_KeepsTheDocumentRunning(t *testing.T) {
 	}
 	if st := read(t, path); st.Running {
 		t.Error("running = true after the whole copy finished")
+	}
+}
+
+// Before a batch is known — while the devices are still being scanned — the
+// totals are null rather than zero. "0 of 0 files" reads as a finished backup
+// to anything comparing done against total, and divides by zero in a bar.
+func TestNew_TotalsAreNullUntilTheBatchIsKnown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "progress.json")
+	w, err := progress.New(path, "scanning")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st := read(t, path)
+	if !st.Running || st.Phase != "scanning" {
+		t.Errorf("running = %v, phase = %q — want a running scan", st.Running, st.Phase)
+	}
+	if st.Files.Total != nil || st.Bytes.Total != nil {
+		t.Errorf("totals = %v / %v, want null while the scan is running",
+			st.Files.Total, st.Bytes.Total)
+	}
+	if st.ETASeconds != nil {
+		t.Error("an ETA was estimated with nothing known about the batch")
+	}
+
+	w.StartBatch("camera→ssd", 7, 700)
+	if st := read(t, path); st.Files.Total == nil || *st.Files.Total != 7 {
+		t.Errorf("files.total = %v after StartBatch, want 7", st.Files.Total)
 	}
 }

@@ -61,7 +61,10 @@ type State struct {
 type FileCounts struct {
 	Done   int `json:"done"`
 	Failed int `json:"failed"`
-	Total  int `json:"total"`
+	// Total is null before the batch is known — while the devices are still
+	// being scanned. Zero would read as "0 of 0 files", which a script
+	// checking done == total takes for a finished backup.
+	Total *int `json:"total"`
 }
 
 type ByteCounts struct {
@@ -69,8 +72,10 @@ type ByteCounts struct {
 	// still being written. A bar drawn from Done/Total therefore keeps moving
 	// through a large video instead of standing still until it finishes —
 	// which is the case a progress bar exists for.
-	Done  int64 `json:"done"`
-	Total int64 `json:"total"`
+	Done int64 `json:"done"`
+	// Total is null until the batch is known, so a bar cannot be drawn from a
+	// division by zero while the scan is still running.
+	Total *int64 `json:"total"`
 }
 
 type Current struct {
@@ -89,7 +94,9 @@ type Writer struct {
 	// phases.
 	start time.Time
 
-	mu         sync.Mutex
+	mu sync.Mutex
+	// known is false until StartBatch says how much there is to copy.
+	known      bool
 	total      int
 	totalBytes int64
 	done       int
@@ -101,16 +108,17 @@ type Writer struct {
 }
 
 // New starts publishing to path. The first document is written immediately, so
-// a reader polling the file sees the copy start rather than waiting for the
-// first chunk of a large video.
-func New(path, phase string, totalFiles int, totalBytes int64) (*Writer, error) {
+// a reader sees the run start rather than waiting for the first chunk of a
+// large video — scanning a full card takes long enough to be worth reporting.
+//
+// How much there is to copy is not known yet; the totals stay null until
+// StartBatch says.
+func New(path, phase string) (*Writer, error) {
 	w := &Writer{
-		path:       path,
-		phase:      phase,
-		start:      time.Now(),
-		total:      totalFiles,
-		totalBytes: totalBytes,
-		inFlight:   map[string]Current{},
+		path:     path,
+		phase:    phase,
+		start:    time.Now(),
+		inFlight: map[string]Current{},
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("progress: %w", err)
@@ -162,6 +170,7 @@ func (w *Writer) Observe(fp copyop.FileProgress) {
 func (w *Writer) StartBatch(phase string, totalFiles int, totalBytes int64) {
 	w.mu.Lock()
 	w.phase = phase
+	w.known = true
 	w.total = totalFiles
 	w.totalBytes = totalBytes
 	w.done, w.failed, w.doneBytes = 0, 0, 0
@@ -197,8 +206,12 @@ func (w *Writer) write(final bool) error {
 		PID:       os.Getpid(),
 		StartedAt: w.start.Format(time.RFC3339),
 		UpdatedAt: now.Format(time.RFC3339),
-		Files:     FileCounts{Done: w.done, Failed: w.failed, Total: w.total},
-		Bytes:     ByteCounts{Done: w.doneBytes, Total: w.totalBytes},
+		Files:     FileCounts{Done: w.done, Failed: w.failed},
+		Bytes:     ByteCounts{Done: w.doneBytes},
+	}
+	if w.known {
+		total, totalBytes := w.total, w.totalBytes
+		st.Files.Total, st.Bytes.Total = &total, &totalBytes
 	}
 	// Always a list, never null: a reader should not have to handle two
 	// spellings of "nothing is being written right now".
@@ -218,7 +231,7 @@ func (w *Writer) write(final bool) error {
 	st.Bytes.Done = moved
 	if elapsed := now.Sub(w.start).Seconds(); elapsed > 0 {
 		st.BytesPerSecond = int64(float64(moved) / elapsed)
-		if !final && st.BytesPerSecond > 0 && w.totalBytes > moved {
+		if !final && w.known && st.BytesPerSecond > 0 && w.totalBytes > moved {
 			eta := int64(float64(w.totalBytes-moved) / float64(st.BytesPerSecond))
 			st.ETASeconds = &eta
 		}

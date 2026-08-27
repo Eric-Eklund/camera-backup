@@ -215,7 +215,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		// Every panel moved, so anything drawn over one is in the wrong place.
-		m.kittyShown = ""
+		// The signature is left alone: it encodes the cells each image sits
+		// in, so a real layout change forces a redraw by itself — and clearing
+		// it first would tell kittyForget there is nothing to take away, which
+		// is exactly the case when the terminal shrinks past the width that
+		// carries an Info panel at all.
 		return m, m.kittySync()
 
 	case tea.KeyMsg:
