@@ -66,44 +66,95 @@ func (f FileInfo) DestKey() string {
 	return strings.ToLower(f.DestRelPath())
 }
 
-// Walk scans root recursively and returns files whose extension (case-insensitive) is in exts.
-// exts must already be lowercase (use config.NormalisedExtensions()).
-// Permission errors on subdirectories are silently skipped.
-func Walk(root string, exts []string) ([]FileInfo, error) {
-	extSet := make(map[string]struct{}, len(exts))
-	for _, e := range exts {
-		extSet[e] = struct{}{}
-	}
+// Unreadable records one path a scan could not read, and why.
+//
+// A directory that cannot be opened is not an empty directory: its files are
+// simply invisible to the walk. Dropping it silently is what turned a card
+// with an I/O error into a run where status reported nothing missing, copy
+// reported every file copied and verify reported every file OK — while a
+// photograph nobody had ever read sat on the card waiting to be formatted
+// away. Every scan therefore hands these back, and callers must say so.
+type Unreadable struct {
+	// Path is the file or directory that could not be read.
+	Path string
+	// Err is what the filesystem said.
+	Err error
+}
 
-	var files []FileInfo
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable dirs/files
-		}
-		if d.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if _, ok := extSet[ext]; !ok {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		files = append(files, FileInfo{
-			RelPath: filepath.ToSlash(rel),
-			AbsPath: path,
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
-		})
+func (u Unreadable) String() string {
+	return fmt.Sprintf("%s: %v", u.Path, u.Err)
+}
+
+// Paths returns just the paths of a set of unreadable entries, for messages
+// that name them without repeating each error.
+func Paths(u []Unreadable) []string {
+	out := make([]string, len(u))
+	for i, e := range u {
+		out[i] = e.Path
+	}
+	return out
+}
+
+// Walk scans root recursively and returns files whose extension
+// (case-insensitive) is in exts. exts must already be lowercase (use
+// config.NormalisedExtensions()).
+//
+// Paths the walk could not read are collected into the second return value
+// rather than dropped, and the walk carries on so the rest of the device is
+// still scanned. A caller that ignores that list is reporting on a device it
+// only partly saw.
+func Walk(root string, exts []string) ([]FileInfo, []Unreadable, error) {
+	w := &walker{extSet: make(map[string]struct{}, len(exts)), root: root}
+	for _, e := range exts {
+		w.extSet[e] = struct{}{}
+	}
+	err := filepath.WalkDir(root, w.visit)
+	return w.files, w.unreadable, err
+}
+
+// walker accumulates one Walk. It exists so visit can be driven directly by a
+// test with synthesised failures: a readdir error is the case that matters
+// most here and the hardest one to arrange on a real filesystem.
+type walker struct {
+	root       string
+	extSet     map[string]struct{}
+	files      []FileInfo
+	unreadable []Unreadable
+}
+
+// visit is the filepath.WalkDir callback. Errors are recorded and the walk
+// continues; only a path that cannot be made relative to the root aborts it,
+// since that means the walk is somewhere it was never asked to go.
+func (w *walker) visit(path string, d fs.DirEntry, err error) error {
+	if err != nil {
+		w.unreadable = append(w.unreadable, Unreadable{Path: path, Err: err})
 		return nil
+	}
+	if d.IsDir() {
+		return nil
+	}
+	ext := strings.ToLower(filepath.Ext(d.Name()))
+	if _, ok := w.extSet[ext]; !ok {
+		return nil
+	}
+	info, err := d.Info()
+	if err != nil {
+		// The entry was listed but its metadata could not be read — the file
+		// is real and this scan cannot describe it.
+		w.unreadable = append(w.unreadable, Unreadable{Path: path, Err: err})
+		return nil
+	}
+	rel, err := filepath.Rel(w.root, path)
+	if err != nil {
+		return err
+	}
+	w.files = append(w.files, FileInfo{
+		RelPath: filepath.ToSlash(rel),
+		AbsPath: path,
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
 	})
-	return files, err
+	return nil
 }
 
 // StableAge is the minimum age of a source file's modtime before it is
@@ -144,15 +195,20 @@ func SplitByCategory(files []FileInfo, categoryFn func(FileInfo) string) (photos
 // WalkDual scans a device's photos and videos roots. When both categories
 // share one root it is scanned once and the same list is returned for both.
 // A missing or empty root yields a nil list.
+//
+// Unlike a source scan this discards what it could not read: these are
+// destination trees, and an unreadable corner of one makes files look missing
+// rather than making them disappear — the copy that follows adds a duplicate
+// instead of skipping a photograph.
 func WalkDual(photosRoot, videosRoot string, exts []string) (photos, videos []FileInfo) {
 	if photosRoot != "" {
-		photos, _ = Walk(photosRoot, exts)
+		photos, _, _ = Walk(photosRoot, exts)
 	}
 	if videosRoot == photosRoot {
 		return photos, photos
 	}
 	if videosRoot != "" {
-		videos, _ = Walk(videosRoot, exts)
+		videos, _, _ = Walk(videosRoot, exts)
 	}
 	return photos, videos
 }

@@ -153,9 +153,9 @@ func copyVerified(t Task, logger *log.Logger, writeTimeout time.Duration, extra 
 	return nil
 }
 
-// errWriteTimeout reports that a destination write did not finish within the
-// configured timeout — the signature of a hung network mount.
-var errWriteTimeout = errors.New("destination write timed out")
+// errWriteTimeout reports that a destination stopped accepting data for longer
+// than the configured timeout — the signature of a hung network mount.
+var errWriteTimeout = errors.New("destination write stalled")
 
 // destFile is the subset of *os.File that copyStream writes through. It is an
 // interface rather than *os.File so tests can substitute a writer that hangs
@@ -167,16 +167,28 @@ type destFile interface {
 
 // copyStream streams src into dst (mirroring progress into pw) and closes dst,
 // flushing to disk first when syncBeforeClose is set (the verified path).
-// A timeout <= 0 waits forever. If the transfer is still running when the
-// timeout elapses, copyStream returns errWriteTimeout immediately; the stalled
-// transfer is left running in the background and onAbandoned is called once it
-// finally returns, so the caller can clean up the destination without blocking
-// on the hung mount. On any other error dst is closed before returning.
+//
+// timeout bounds how long the destination may go without accepting a single
+// byte — it is a stall detector, not a deadline for the file. That distinction
+// is the whole point: a 40 GB video over a phone hotspot takes far longer than
+// any timeout anyone would set against a hung mount, and measuring the total
+// transfer instead would abort every large file on a perfectly healthy link.
+// A timeout <= 0 waits forever.
+//
+// When the destination does stall, copyStream returns errWriteTimeout
+// immediately; the stuck transfer is left running in the background and
+// onAbandoned is called once it finally returns, so the caller can clean up the
+// destination without blocking on the hung mount. On any other error dst is
+// closed before returning.
 func copyStream(dst destFile, src io.Reader, pw io.Writer, relPath, dstPath string, syncBeforeClose bool, timeout time.Duration, onAbandoned func()) error {
 	// The progress sink is silenced on timeout: an abandoned transfer must not
 	// touch it after the batch has moved on (it may be a closed events channel
-	// or a progress line another file is now rendering to).
+	// or a progress line another file is now rendering to). It doubles as the
+	// stall detector's clock — every chunk the destination accepts passes
+	// through it, so "last write" and "still making progress" are the same
+	// fact observed in one place.
 	sw := &stopWriter{w: pw}
+	sw.mark()
 	done := make(chan error, 1)
 	go func() {
 		buf := make([]byte, copyBufSize)
@@ -204,40 +216,78 @@ func copyStream(dst destFile, src io.Reader, pw io.Writer, relPath, dstPath stri
 	if timeout <= 0 {
 		return <-done
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case err := <-done:
-		return err
-	case <-timer.C:
-		sw.stopped.Store(true)
-		go func() {
-			<-done
-			onAbandoned()
-		}()
-		return errWriteTimeout
+	// Poll rather than arm a single timer: the deadline moves forward with
+	// every chunk the destination accepts, and a timer that had to be reset
+	// per chunk would cost more than the check does.
+	ticker := time.NewTicker(stallCheckInterval(timeout))
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ticker.C:
+			if sw.idleFor() < timeout {
+				continue // still making progress
+			}
+			sw.stopped.Store(true)
+			go func() {
+				<-done
+				onAbandoned()
+			}()
+			return errWriteTimeout
+		}
 	}
 }
 
-// stopWriter forwards writes until stopped is set, then swallows them.
+// stallCheckInterval is how often a copy is asked whether it has moved. A
+// quarter of the timeout keeps the overshoot proportional, bounded so a long
+// timeout does not go unchecked for minutes and a short one (tests, an
+// impatient config) is still noticed promptly.
+func stallCheckInterval(timeout time.Duration) time.Duration {
+	d := timeout / 4
+	if d < 10*time.Millisecond {
+		return 10 * time.Millisecond
+	}
+	if d > time.Second {
+		return time.Second
+	}
+	return d
+}
+
+// stopWriter forwards writes until stopped is set, then swallows them, and
+// records when the last one came through so the caller can tell a slow
+// destination from a stopped one.
 type stopWriter struct {
 	w       io.Writer
 	stopped atomic.Bool
+	lastAt  atomic.Int64 // UnixNano of the last write to reach the destination
 }
 
 func (s *stopWriter) Write(p []byte) (int, error) {
 	if s.stopped.Load() {
 		return len(p), nil
 	}
+	// The destination is written first by the MultiWriter above, so reaching
+	// this line means those bytes have already been accepted.
+	s.mark()
 	return s.w.Write(p)
 }
 
-// nasTimeoutError builds the user-facing error for a timed-out NAS write.
+// mark records that the destination has just accepted data.
+func (s *stopWriter) mark() { s.lastAt.Store(time.Now().UnixNano()) }
+
+// idleFor reports how long the destination has gone without accepting a byte.
+func (s *stopWriter) idleFor() time.Duration {
+	return time.Since(time.Unix(0, s.lastAt.Load()))
+}
+
+// nasTimeoutError builds the user-facing error for a stalled NAS write.
 // Removing the partial file inline would block on the same hung mount, so
-// copyStream removes it in the background once the stalled write returns.
+// copyStream removes it in the background once the stalled write returns — or,
+// if this process exits first, on the next run that can reach the share.
 func nasTimeoutError(writeTimeout time.Duration, relPath, dstPath string) error {
-	return fmt.Errorf("NAS write timed out after %v on %q — check your mount options (consider soft,timeo=... for NFS); partial file %q is removed when the mount recovers",
-		writeTimeout, relPath, dstPath)
+	return fmt.Errorf("NAS write on %q made no progress for %v — check your mount options (consider soft,timeo=... for NFS); the partial file %q is removed once the mount recovers",
+		relPath, writeTimeout, dstPath)
 }
 
 // Copy copies one task to dstRoot quickly without sync or SHA256 verification.

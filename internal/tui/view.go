@@ -350,13 +350,16 @@ func (m *Model) renderNode(node treeNode, w int, focused bool) string {
 	return s.Render(label)
 }
 
+// fileStatus reports whether f is already backed up on each destination.
+//
+// "Backed up" means precisely "the copy would not copy it": the answer comes
+// from the same missing lists that build the batch, so a tick here and a skip
+// there are one decision, not two that happen to agree most of the time.
 func (m *Model) fileStatus(f scan.FileInfo) (onSSD, onNAS bool) {
 	if m.status == nil {
 		return
 	}
-	cat := m.cfg.Category(f.RelPath)
-	key := f.DestKey()
-	return m.ssdKeys[cat][key], m.nasKeys[cat][key]
+	return !m.missingSSD[f.AbsPath], !m.missingNAS[f.AbsPath]
 }
 
 func (m *Model) renderDetailPanel(w, h int) string {

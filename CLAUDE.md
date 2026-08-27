@@ -52,11 +52,11 @@ Seven subcommands (Cobra CLI):
 | `internal/config` | TOML loading + `Validate()` + `Save()` (comment-preserving write-back), extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SetSourceOverride()`, `SSDInUse()` |
 | `internal/progress` | `--progress-json`: a state document for the batch in flight, replaced atomically while it runs |
 | `internal/devices` | Linux mounted-device discovery (`/proc/self/mountinfo` + `/sys/class/block`) for the source picker |
-| `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison |
+| `internal/scan` | Recursive file walk, `MissingFromDest()` / `MissingByRelPath()` comparison; `Walk` also returns the paths it could not read (`[]Unreadable`) |
 | `internal/copyop` | `CopyAndVerify` (Sync+SHA256; Camera→SSD and direct Source→NAS), `Copy` (fast, SSD→NAS), `RunBatch(verify bool)`, `RunBatchParallel()` (TUI worker pool with `FileProgress` events) |
 | `internal/checksum` | SHA256 with optional progress writer |
 | `internal/status` | Status command logic; `Compute()` returns `StatusResult` for the TUI; `NewReport()`/`WriteJSON()` are the `--json` form, whose field names are a public contract (`json_test.go` pins them) (`status_test.go` covers the fan-in: category routing, merged roots, direct mode, the no-camera fallback, unstable files, root availability, source resolution) |
-| `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI |
+| `internal/verify` | Verify command logic; `RunWithCallback()` streams per-file results to the TUI and returns an `Outcome` naming what went unchecked |
 | `internal/preview` | Thumbnails (JPEG direct, RAW via exiftool), ANSI block art, Kitty Graphics Protocol; `scaleImage` halves large frames before the resampling kernel (`prescale`) |
 | `internal/tui` | bubbletea Model/Update/View, ops launchers, fsnotify device watcher, settings screen (`settings.go`) |
 | `internal/ui` | Terminal colors, progress bar, `Prompt()`, `AskYesNo()`, `FreeSpace()` |
@@ -116,7 +116,8 @@ without the setting. Notes:
   `status` reports the SSD as *bypassed*, `MissingOnSSD` is not computed, and the
   TUI hides the SSD badge, the ✓SSD column and the "Missing on SSD" tab.
 - `sync` still works in direct mode when SSD roots are configured — it is an
-  explicit SSD→NAS request.
+  explicit SSD→NAS request. `verify`, by contrast, ignores the SSD entirely in
+  direct mode; see "What verify does and does not cover".
 
 ### Destination roots
 
@@ -130,6 +131,26 @@ its own `DstRoot`. If one category's root is unavailable, the other category is
 still copied and skipped files are reported (CLI warning / TUI `⚠ NAS ✔P✘V`
 badge + skip counts). A root "is available" when it or its parent directory
 exists (`config.RootAvailable`) — the root itself is created on first copy.
+
+### The NAS write timeout is a stall detector
+
+`nas_write_timeout_seconds` bounds how long a destination may go **without
+accepting a single byte** — not how long a file may take. `copyStream` marks a
+timestamp on every chunk the destination takes (`stopWriter` is both the
+progress sink and the clock, so "the bar moved" and "the mount is alive" are one
+observation) and a ticker asks every `stallCheckInterval` whether the gap has
+grown past the timeout.
+
+It was originally a single timer armed before the transfer, which made it a
+deadline for the whole file: at the default 60 s that aborts a 2 GB video at
+30 MB/s, and anything over ~300 MB on a VPN — on a link that was working
+perfectly. The README compounded it by advising a *low* value. Both are now
+consistent: low is safe, because it measures silence rather than size.
+
+The `errWriteTimeout` path is otherwise unchanged — the stuck transfer is left
+running, `onAbandoned` removes the partial file once it finally returns, and the
+error names the stall (`made no progress for 60s`) rather than suggesting the
+timeout was too short.
 
 ### Copy phase details
 
@@ -230,6 +251,15 @@ must never overstate what it checked:
   `missing from NAS`.
 - Only extensions in `file_extensions` are seen, by `verify` exactly as by
   `status` and `copy`. A file type left out of the list is invisible everywhere.
+- **In direct mode the SSD is not a destination.** `ssdPhotosAvail` is
+  `cfg.SSDInUse() && RootAvailable(…)`, not `RootAvailable(…)` alone. Nothing is
+  written to the SSD when `direct_to_nas` is set, so treating a
+  configured-but-bypassed SSD as a place copies should be reported six of seven
+  files as "missing from SSD" on a dump that was in fact perfect — and
+  config-template.toml actively suggests keeping the keys, since `sync` still
+  uses them. The same gate decides the authority: with no card mounted, direct
+  mode has none, and the error says why rather than silently verifying a tree
+  this configuration never writes to.
 
 `TestCopyAndVerifyAgree` (verify package) is what keeps the two from drifting:
 for each scenario it asserts *both* that `scan.MissingFromDest` skips the source
@@ -250,6 +280,37 @@ JPEG, TIFF, RAF and MP4 fixtures (`buildJPEG`, `buildTIFF`, `buildRAF`,
 Comparison uses filename + size (not hash) for speed. Collision: same name but different size is treated as a new file and saved with a `_N` suffix — the source is never modified. On re-runs, `MissingFromDest` also probes the `_N` variants by size so collision files are not copied again. It also probes basename+size **anywhere** in the destination tree — an old backup, or a source-modtime change on a file with no capture metadata, must not duplicate the file under a second date directory — but only skips on that evidence once the capture times agree; see "Is this destination file the same photograph?" above.
 
 Source files whose modtime is within `scan.StableAge` (10 s) of the scan are treated as still being written and skipped with a warning (`scan.SplitStable`, applied in `runCopy`, `runDirect` and `status.Compute` → `StatusResult.CameraUnstable`); copying mid-write would produce a truncated destination. Far-future modtimes (wrong camera clock) are treated as stable.
+
+### A path that cannot be read is never skipped in silence
+
+`scan.Walk` returns `[]Unreadable` alongside the files, and `WalkSource` passes
+it straight through. This is not error handling for its own sake — it is the
+difference between "the card has no more photos on it" and "the card would not
+show them to us", and the walk used to answer `return nil` to both.
+
+The consequence was that all three safety nets agreed on a backup nobody made:
+`status` reported nothing missing, `copy` reported every file copied and
+verified, `verify` reported every file OK — with a photograph still on the card,
+mentioned nowhere. That is precisely the state in which somebody formats a card.
+
+So every source scan has to surface it:
+
+- `status.Compute` keeps `StatusResult.SourceUnreadable`; `status` prints
+  `ui.PrintUnreadable` and `--json` carries `counts.unreadable`. That count is a
+  plain integer, not the null-when-not-computed kind — this comparison always
+  happens.
+- `runCopy` and `runDirect` warn immediately and then return
+  `incompleteSourceError`, so the command **exits non-zero**. They still copy
+  everything they could reach first: those files are worth having, and the exit
+  status is what stops the run reading as complete.
+- `verify` reports them in `Outcome.Unreadable`, and `Outcome.Clean()` is false
+  while any remain — "All N files verified OK" must never stand for files
+  nothing could open.
+- The TUI shows them on the done screen (`verifyDoneText`).
+
+Destination scans deliberately still discard theirs (`WalkDual`): an unreadable
+corner of a destination makes files look *missing*, so the next copy adds a
+duplicate rather than hiding a photograph. The asymmetry is the point.
 
 ### Key invariants
 
@@ -272,6 +333,14 @@ belong in this program, however carefully it verifies first — clearing the
 staging SSD is the user's job, done by hand. Tooling may *report* what is
 safely copied elsewhere; it may not act on that report. (This was proposed once
 as a `prune` command, built, and rejected for exactly this reason.)
+
+**A run that did not finish the job exits non-zero.** `sync` used to print a
+warning and return nil, so `copy`'s second phase could fail entirely while the
+command reported success — and a cron job, a systemd timer or
+`camera-backup sync && …` has nothing but the exit status to go on. Failures
+during SSD→NAS now return an error, as phase 1 and `dump` always did, and a
+source the scan could only partly read does too (see above). The printed output
+is unchanged; it is the status that had to stop lying.
 
 - Source files are never modified or deleted
 - Destination files are created with `O_EXCL` — never overwritten
@@ -344,6 +413,7 @@ reasons behind its shape are worth keeping:
 - `statusReadyMsg`/`deviceChangedMsg` are ignored outside the loading/main screens so operations are never interrupted visually
 - `h`/`l` (and `←`/`→`) walk the date tree: `enterNode` opens a group or steps to its first child (a file opens the preview), `leaveNode` closes an open group where it stands, and otherwise moves to the parent and closes that — `h` on a file must land on its day, not merely collapse in place. `parentIndex` finds the parent by scanning the flattened list upwards for the nearest lower level
 - `[`/`]` jump between level-2 (date) rows; `z`/`Z` fold the whole tree shut/open and `f` folds everything but the current date. All three go through `relocate`, which puts the cursor back on the row it was on — or its nearest still-visible ancestor, so a fold never dumps the user at row 0
+- The ✓SSD/✓NAS column comes from `Model.missingSSD`/`missingNAS`, built by `absPathSet` from `StatusResult.MissingOnSSD`/`MissingOnNAS` — the very lists the copy is built from. It must never be re-derived from a set of destination filenames: that answers "is something over there called that?", which marked a file whose destination copy had a *different size* as backed up, and a file already filed under another date as missing. The tick is what a person reads before formatting a card, so it has to mean exactly what `y` would do
 - Selection (`space`/`a`) filters what `y` copies; empty selection = copy everything. `y` also works from the grid view
 - Grid view scrolls: `gridOffset` + `gridScrollToCursor()` keep the cursor row visible; thumbnails load incrementally for the visible window plus one lookahead row (no fixed cap)
 - `?` opens the help screen (from main and grid); the Files panel title shows the visible row range (`Files 28–53/68`) when the tree overflows
@@ -403,9 +473,22 @@ rendering). `tui.New` takes the config path for it; `""` makes it read-only.
 - `config.Save()` is a line-oriented rewrite, not a re-encode: it replaces each
   key where it already appears (uncommenting it, keeping trailing comments) and
   appends only what is missing, writing atomically via a temp file + rename.
-  `findAssignment` deliberately rewrites exactly one line and prefers a live
-  assignment over a commented one, so prose that looks like `# key = value` is
+  `findAssignment` deliberately rewrites exactly one *assignment* and prefers a
+  live one over a commented one, so prose that looks like `# key = value` is
   never turned into config.
+- That assignment may span several lines: an array written one element per line
+  is valid TOML and the natural way to annotate a `file_extensions` list.
+  `findAssignment` returns a line *range*, following the value with
+  `bracketDepth` (which ignores brackets inside strings and comments) to its
+  closing bracket. Rewriting only the first line left the tail behind as stray
+  text and produced a config.toml the program could no longer load — the user's
+  own file, destroyed by pressing `s`, with the tool then refusing to start.
+  Edits are applied bottom-up because replacing a span shifts every line index
+  below it. Comments *between* array elements do not survive; the elements do.
+- `verifyRewrite` is the backstop for the rest of that class: the rendered text
+  is parsed, re-rendered from what parsed, and compared key-for-key against what
+  Save meant to write. Anything that does not match and nothing is written.
+  `Validate()` checks the *configuration*; it never sees the file.
 - After a successful save `saveSettings()` swaps `m.cfg`, calls
   `restartWatcher()` (the watcher takes a stop channel so it can follow new
   paths) and issues a fresh `statusScanCmd` — edited paths take effect without a

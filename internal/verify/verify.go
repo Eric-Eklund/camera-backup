@@ -20,6 +20,24 @@ type FileResult struct {
 	Issues  []string
 }
 
+// Outcome is what a pass could not look at. Both fields have to reach the user
+// with the result: a count of verified files presented on its own stands for
+// destinations nothing compared against and for files nothing could read.
+type Outcome struct {
+	// UnmountedRoots names configured destinations that were not mounted, and
+	// so were not compared against.
+	UnmountedRoots []string
+	// Unreadable lists paths on the authority device the scan could not read.
+	// Those files were never hashed and appear nowhere else in the result —
+	// not as OK, not as a failure, not in the total.
+	Unreadable []scan.Unreadable
+}
+
+// Clean reports whether the pass saw everything it was configured to see.
+func (o Outcome) Clean() bool {
+	return len(o.UnmountedRoots) == 0 && len(o.Unreadable) == 0
+}
+
 // ProgressFn is called after each file is verified.
 type ProgressFn func(done, total int, r FileResult)
 
@@ -27,7 +45,7 @@ type ProgressFn func(done, total int, r FileResult)
 // If verbose is true every file is printed; otherwise only failures are shown.
 func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
 	bad, total := 0, 0
-	skipped, err := verifyAll(cfg, logger, os.Stdout, func(done, tot int, r FileResult) {
+	outcome, err := verifyAll(cfg, logger, os.Stdout, func(done, tot int, r FileResult) {
 		total = tot
 		ok := len(r.Issues) == 0
 		if !ok {
@@ -49,17 +67,20 @@ func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
 
 	fmt.Println()
 	switch {
-	case bad == 0 && len(skipped) == 0:
+	case bad == 0 && outcome.Clean():
 		ui.Green.Printf("  All %d files verified OK.\n\n", total)
 	case bad == 0:
-		// Never let an unchecked destination read as a clean bill of health.
-		ui.Green.Printf("  All %d files verified OK against the destinations that were checked.\n", total)
-		ui.Yellow.Printf("  ⚠️  Not checked: %s — mount and re-run to verify there.\n\n", strings.Join(skipped, ", "))
+		// Never let an unchecked destination, or a file nothing could read,
+		// pass for a clean bill of health.
+		ui.Green.Printf("  All %d files verified OK against what could be checked.\n", total)
 	default:
 		ui.Yellow.Printf("  %d / %d files have issues.\n", bad, total)
-		if len(skipped) > 0 {
-			ui.Yellow.Printf("  ⚠️  Not checked: %s — mount and re-run to verify there.\n", strings.Join(skipped, ", "))
-		}
+	}
+	if len(outcome.UnmountedRoots) > 0 {
+		ui.Yellow.Printf("  ⚠️  Not checked: %s — mount and re-run to verify there.\n", strings.Join(outcome.UnmountedRoots, ", "))
+	}
+	ui.PrintUnreadable(outcome.Unreadable)
+	if bad != 0 || !outcome.Clean() {
 		fmt.Println()
 	}
 	return nil
@@ -67,10 +88,10 @@ func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
 
 // RunWithCallback verifies all files without printing to stdout.
 // fn is called after each file completes; fn may be nil.
-// The returned list names the configured destinations that were not mounted and
-// therefore not compared against — a pass that skipped one has not verified the
-// backup, so callers must not present it as a clean result.
-func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) ([]string, error) {
+// The returned Outcome names what the pass could not look at — a pass that
+// skipped a destination or could not read part of the source has not verified
+// the backup, so callers must not present it as a clean result.
+func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) (Outcome, error) {
 	return verifyAll(cfg, logger, nil, fn)
 }
 
@@ -79,31 +100,40 @@ func RunWithCallback(cfg *config.Config, logger *log.Logger, fn ProgressFn) ([]s
 // progress bars are written to it; when nil the pass is silent.
 // fn (may be nil) receives each file's result as it completes.
 //
-// It returns the configured destinations it could not compare against. An
-// unmounted root is not an error — the other destinations are still worth
-// checking — but silence about it would let "all files verified OK" stand for a
-// destination nothing ever looked at.
-func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn ProgressFn) (skipped []string, err error) {
+// It returns what it could not look at. An unmounted root is not an error — the
+// other destinations are still worth checking — but silence about it would let
+// "all files verified OK" stand for a destination nothing ever looked at, and
+// the same is true of a source path the scan could not open.
+func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn ProgressFn) (outcome Outcome, err error) {
 	exts := cfg.NormalisedExtensions()
 
 	source := cfg.ActiveSource()
 	sourceAvail := isDir(source)
-	ssdPhotosAvail := config.RootAvailable(cfg.SSDPhotos)
-	ssdVideosAvail := config.RootAvailable(cfg.SSDVideos)
+	// direct_to_nas takes the SSD out of the pipeline, so it is not a
+	// destination this run should expect copies on and not an authority to
+	// fall back to. Treating a configured-but-bypassed SSD as available made
+	// verify report every directly dumped file as "missing from SSD" — six
+	// failures out of seven on a backup that was in fact perfect.
+	ssdInUse := cfg.SSDInUse()
+	ssdPhotosAvail := ssdInUse && config.RootAvailable(cfg.SSDPhotos)
+	ssdVideosAvail := ssdInUse && config.RootAvailable(cfg.SSDVideos)
 	nasPhotosAvail := config.RootAvailable(cfg.NASPhotos)
 	nasVideosAvail := config.RootAvailable(cfg.NASVideos)
 
 	if !sourceAvail && !ssdPhotosAvail && !ssdVideosAvail {
-		return nil, fmt.Errorf("no verification authority available — mount the source device (%s) or an SSD root", source)
+		if ssdInUse {
+			return outcome, fmt.Errorf("no verification authority available — mount the source device (%s) or an SSD root", source)
+		}
+		return outcome, fmt.Errorf("no verification authority available — mount the source device (%s); the local SSD is bypassed by direct_to_nas", source)
 	}
 
-	skipped = unmountedRoots(cfg, map[string]bool{
+	outcome.UnmountedRoots = unmountedRoots(cfg, map[string]bool{
 		"photos": ssdPhotosAvail, "videos": ssdVideosAvail,
 	}, map[string]bool{
 		"photos": nasPhotosAvail, "videos": nasVideosAvail,
 	})
-	if len(skipped) > 0 {
-		logger.Printf("VERIFY skipped unmounted destinations: %s", strings.Join(skipped, ", "))
+	if len(outcome.UnmountedRoots) > 0 {
+		logger.Printf("VERIFY skipped unmounted destinations: %s", strings.Join(outcome.UnmountedRoots, ", "))
 	}
 
 	// Destination indices, one per category root (shared when merged).
@@ -133,9 +163,12 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 
 	var authorityFiles []scan.FileInfo
 	if sourceAvail {
-		authorityFiles, err = scan.WalkSource(source, exts)
+		authorityFiles, outcome.Unreadable, err = scan.WalkSource(source, exts)
 		if err != nil {
-			return nil, err
+			return outcome, err
+		}
+		for _, u := range outcome.Unreadable {
+			logger.Printf("VERIFY UNREADABLE source path %s", u)
 		}
 	} else {
 		if progressOut != nil {
@@ -214,7 +247,7 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 			fn(i+1, total, res)
 		}
 	}
-	return skipped, nil
+	return outcome, nil
 }
 
 // unmountedRoots names the configured destination roots that are not currently
@@ -227,6 +260,8 @@ func unmountedRoots(cfg *config.Config, ssdAvail, nasAvail map[string]bool) []st
 			out = append(out, fmt.Sprintf("%s (%s)", name, root))
 		}
 	}
+	// ssdAvail is already false for an SSD that is bypassed or unconfigured,
+	// so there is nothing to name in either case.
 	if cfg.SSDInUse() {
 		if cfg.SSDMerged() {
 			add("SSD", cfg.SSDPhotos, ssdAvail["photos"])

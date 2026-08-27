@@ -677,11 +677,15 @@ func captureTimesOf(paths []string) map[int]time.Time {
 // WalkSource scans a source device like Walk and additionally reads each file's
 // capture time, so DestRelPath files a shot under the date it was taken rather
 // than the date the file happened to be written.
-func WalkSource(root string, exts []string) ([]FileInfo, error) {
-	files, err := Walk(root, exts)
+//
+// It returns Walk's unreadable paths unchanged. On a source they are the most
+// important thing the scan has to say: those files exist and this run cannot
+// see them.
+func WalkSource(root string, exts []string) ([]FileInfo, []Unreadable, error) {
+	files, unreadable, err := Walk(root, exts)
 	if err != nil {
-		return nil, err
+		return nil, unreadable, err
 	}
 	FillCaptureTimes(files)
-	return files, nil
+	return files, unreadable, nil
 }

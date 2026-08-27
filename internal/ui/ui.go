@@ -9,7 +9,38 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+
+	"github.com/Eric-Eklund/camera-backup/internal/scan"
 )
+
+// unreadableListLimit caps how many unreadable paths are printed before the
+// rest are left to the log. Enough to recognise the pattern, few enough that
+// the warning does not scroll the summary off the screen.
+const unreadableListLimit = 10
+
+// PrintUnreadable reports paths a scan could not read.
+//
+// This is deliberately the loudest thing this package prints. Every other
+// warning concerns files the program can see and chose not to touch; these are
+// files it cannot see at all, so nothing else in the run — not the missing
+// counts, not "copied and verified", not "all files verified OK" — describes
+// them. Said quietly, or not at all, the run reads as a finished backup.
+func PrintUnreadable(unreadable []scan.Unreadable) {
+	if len(unreadable) == 0 {
+		return
+	}
+	fmt.Println()
+	Red.Printf("  ❌  %d path(s) on the source could NOT be read — this run did not see the whole device:\n", len(unreadable))
+	for i, u := range unreadable {
+		if i == unreadableListLimit {
+			Red.Printf("      … and %d more — see the log for the full list.\n", len(unreadable)-i)
+			break
+		}
+		Red.Printf("      %s\n", u)
+	}
+	Red.Println("      Files under those paths are NOT backed up. Do not format the card.")
+	fmt.Println()
+}
 
 var (
 	Green  = color.New(color.FgGreen)

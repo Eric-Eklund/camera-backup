@@ -18,7 +18,7 @@ func TestWalk_FindsMatchingExtensions(t *testing.T) {
 	touch(t, filepath.Join(dir, "DCIM/100NIKON/DSC_0002.JPG"))
 	touch(t, filepath.Join(dir, "DCIM/100NIKON/DSC_0003.TXT")) // excluded
 
-	files, err := scan.Walk(dir, []string{".nef", ".jpg"})
+	files, _, err := scan.Walk(dir, []string{".nef", ".jpg"})
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestWalk_CaseInsensitiveExtensions(t *testing.T) {
 	touch(t, filepath.Join(dir, "lower.nef"))
 	touch(t, filepath.Join(dir, "mixed.Nef"))
 
-	files, err := scan.Walk(dir, []string{".nef"})
+	files, _, err := scan.Walk(dir, []string{".nef"})
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestWalk_CaseInsensitiveExtensions(t *testing.T) {
 }
 
 func TestWalk_EmptyDir(t *testing.T) {
-	files, err := scan.Walk(t.TempDir(), []string{".nef"})
+	files, _, err := scan.Walk(t.TempDir(), []string{".nef"})
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestWalk_RecursiveSubdirs(t *testing.T) {
 	touch(t, filepath.Join(dir, "a/mid.NEF"))
 	touch(t, filepath.Join(dir, "a/b/c/deep.NEF"))
 
-	files, err := scan.Walk(dir, []string{".nef"})
+	files, _, err := scan.Walk(dir, []string{".nef"})
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
