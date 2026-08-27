@@ -348,7 +348,7 @@ func observeTo(opts syncOptions, phase string, tasks []copyop.Task, logger *log.
 // openProgress starts publishing to path. A failure is reported and otherwise
 // ignored — a status bar that cannot be fed is no reason to stop a backup.
 func openProgress(path, phase string, logger *log.Logger) (*progress.Writer, error) {
-	w, err := progress.New(path, phase, 0, 0)
+	w, err := progress.New(path, phase)
 	if err != nil {
 		ui.Yellow.Printf("  ⚠️  cannot write progress to %s: %v\n", path, err)
 		logger.Printf("progress: %v", err)
@@ -470,7 +470,13 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	ui.PrintSeparator()
 
 	// ── Phase 2: SSD → NAS ────────────────────────────────────────────────────
-	return runSync(cfg, logger, syncOptions{order: cfg.SyncOrder(), progress: opts.progress})
+	// The path travels with the writer: when opening it before the scan failed,
+	// phase 2 gets its own chance rather than silently publishing nothing.
+	return runSync(cfg, logger, syncOptions{
+		order:        cfg.SyncOrder(),
+		progress:     opts.progress,
+		progressPath: opts.progressPath,
+	})
 }
 
 // runDirect copies files from the source device straight to the NAS, bypassing

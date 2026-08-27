@@ -372,3 +372,27 @@ func TestResize_RedrawsTheGrid(t *testing.T) {
 		t.Errorf("kittyShown = %q, want the grid's placements", m.kittyShown)
 	}
 }
+
+// Shrinking past the width that carries an Info panel must take the image
+// away. The resize used to blank the signature before asking, which left
+// kittyForget with nothing to forget and the thumbnail painted over the file
+// list at its old cells.
+func TestResize_NarrowTerminalClearsTheImage(t *testing.T) {
+	m := kittyModel(t)
+	m.width, m.height = 140, 30
+	if cmd := m.syncInfoPreview(); cmd == nil {
+		t.Fatal("nothing drawn to begin with")
+	}
+
+	_, cmd := m.Update(tea.WindowSizeMsg{Width: 60, Height: 30})
+
+	if m.detailWidth() != 0 {
+		t.Fatalf("detailWidth = %d at 60 columns, want no Info panel", m.detailWidth())
+	}
+	if cmd == nil {
+		t.Error("no command returned; the image is still on screen over the file list")
+	}
+	if m.kittyShown != "" {
+		t.Errorf("kittyShown = %q, want it forgotten", m.kittyShown)
+	}
+}
