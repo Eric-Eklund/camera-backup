@@ -1,15 +1,18 @@
 # Produktionsgranskning — camera-backup
 
-**Datum:** 2026-08-27
+**Datum:** 2026-08-27 (kompletterande pass samma dag — se sista avsnittet)
 **Omfattning:** Hela systemet, med extra fokus på de senaste dagarnas tillskott
 (`status --json`, `--progress-json`, stall-detektorn, unreadable-hanteringen,
 config-omskrivningen) samt kärnvärdena: källan är helig, allt kopieras, inget
 på destinationen skrivs över eller raderas.
 
-**Metod:** Genomläsning av README, CLAUDE.md och all källkod i `cmd/` och
-`internal/`; build + `go vet` + hela testsviten (allt grönt); empiriska tester
-mot genererad testdata för varje misstänkt brist. Inga fynd nedan är
-spekulativa — alla med "Bevisat" är reproducerade mot binären.
+**Metod:** Genomläsning av README, CLAUDE.md och källkoden; build + `go vet` +
+hela testsviten (allt grönt); empiriska tester mot genererad testdata för varje
+misstänkt brist. Inga fynd nedan är spekulativa — alla med "Bevisat" är
+reproducerade mot binären. Första passet läste alla datavägar i sin helhet och
+UI-lagret punktvis; det kompletterande passet (sista avsnittet) täcker resten:
+metadataparsern, hela TUI:n, `devices/`, `preview/`, plus fuzzning och en
+hörnfallsgranskning av testsviten.
 
 ---
 
@@ -206,8 +209,101 @@ false`), så att sökvägen alltid speglar senaste körningen.
 tre har naturliga hem i befintliga testfiler. M1–M3 bör beslutas aktivt
 (fix eller dokumenterat val). L-punkterna är förbättringar utan brådska.
 
-> **Status 2026-08-27:** H1–H3 är åtgärdade på denna branch, med tester
+> **Status 2026-08-27:** H1–H3 är åtgärdade (PR #22, mergad), med tester
 > (`internal/verify/exitstatus_test.go`, nya `TestRunSync_*`-fall i
 > `cmd/camera-backup/main_test.go`, `TestLoad_RejectsEmptyFileExtensions`).
 > Omonterad destination vid `verify` behåller medvetet exit 0 — det
 > dokumenterade "skipped, not failed"-fallet. M- och L-punkterna kvarstår.
+
+---
+
+## Kompletterande pass — 2026-08-27
+
+Första passet läste all kod som rör filer (copyop, scan, main, verify,
+config/save, status, progress, ui, checksum, freespace) i sin helhet men
+UI-lagret endast punktvis. Detta pass täcker resten rad för rad:
+`scan/capture.go` (parserns inre ~570 rader), `tui/model.go`, `tui/view.go`,
+`tui/settings.go`, `tui/devices.go`, `tui/msgs.go`, `tui/styles.go`,
+`devices/` (alla filer), `preview/` (alla filer) — plus en hörnfallsgranskning
+av testsviten och empiriska prov: fuzzning av metadataparsern, 0-bytefiler
+genom hela kedjan, och TUI:n headless i tmux vid 120×40 och 80×24.
+
+### Nytt fynd
+
+**N1 (medel-hög — H2:s kvarvarande syskon): `status`/TUI/`--json` rapporterar
+"up to date" mot en omonterad SSD.** H2-fixen gäller `sync`-kommandot, men
+`status.Compute`:s ingen-kamera-gren (`status.go`, `SSDAvail()`-villkoret) och
+TUI:ns synk-läge använder fortfarande `RootAvailable` — där *parent*-katalogen
+räcker — för SSD:n i rollen som **källa**. En SSD vars rot inte finns men vars
+mount point-förälder gör det (det klassiska omonterade fallet, t.ex.
+`/mnt/ssd/Photos` med `/mnt/ssd` kvar som tom katalog) skannas som tom.
+**Bevisat:** `status --json` ger `compared: "ssd"`, `missing_on_nas: 0`,
+`ssd.photos.available: true`; TUI:n visar "All (0)" och `y` svarar "NAS is
+already up to date." En waybar-panel som läser `missing_on_nas` visar "0 → NAS"
+för en jämförelse som aldrig hände. Kopieringsvägen är säker (CLI-`sync`
+vägrar numera; TUI:n kopierar bara det som skannats) — det är rapporteringen
+som ljuger, vilket är exakt felklassen H2/b34a4d2 handlar om. Förslag: samma
+`isDir`-regel som `runSync` fick, i `Compute`:s källgren och TUI:ns
+synk-villkor; `compared` blir då `"none"` och räknarna null, som JSON-kontraktet
+föreskriver.
+
+### Mindre noteringar
+
+- **N2 (låg):** QuickTime-tider saknar rimlighetsintervall: en korrupt
+  `mvhd` v1 kan via Duration-overflow ge absurda (även negativa) årtal, och
+  EXIF-parsern har golv (år ≥ 1900) men inget tak. Konsekvensen är enbart en
+  bisarr datumkatalog — copy och verify parsar likadant, så jämförelsen förblir
+  konsekvent och inget tappas eller dubbleras.
+- **N3 (info):** TUI:ns progressrader nycklas på `DstRelPath`; två källfiler
+  med samma basnamn och datum (mappöverrullning på samma kort) delar rad på
+  progresskärmen. Räknarna stämmer — endast visningen slås ihop.
+- **N4 (info):** JPEG-parsern hanterar inte 0xFF-fyllnadsbytes före en markör
+  (tillåtet enligt spec, skrivs inte av kameror) — utfallet är bara
+  modtime-fallback, aldrig fel data.
+
+### Vad passet verifierade som robust
+
+- **Metadataparsern (`capture.go`)** är defensivt skriven: begränsade loopar
+  (`maxIFDEntries` 512, `maxHEIFItems` 4096), negativa offsets avvisas,
+  `construction_method 1` avvisas i stället för att läsas som filoffset,
+  atom-vandringen garanterar progress (storlek < header ⇒ fel), 64-bitars
+  atomstorlekar som slår över blir negativa och avvisas. **Fuzzat:** ny
+  `FuzzCaptureTime` (incheckad, seedad med alla containerformat) körde
+  1,56 miljoner exekveringar utan panik, hängning eller obegränsad allokering
+  — parsern tål en trasig kortläsares korrupta headrar.
+- **0-bytefiler** (avbruten kamerawrite): kopieras, synkas och verifieras
+  korrekt genom hela kedjan — empiriskt provat.
+- **`devices/`:** probe per enhet i egen goroutine bakom deadline, arbetar på
+  kopior (race-fritt när timeouten slår), allowlist av filsystem, korrekt
+  mountinfo-parsning med oktala escapes, over-mount på samma mount point
+  hanteras, bind-mountade filer filtreras bort.
+- **`preview/`:** exiftool anropas utan skal med absoluta sökvägar (ingen
+  argumentinjektion — sökvägar börjar alltid med `/`), all skalning är ren
+  beräkning, misslyckade laddningar cachas.
+- **TUI:n:** ✓SSD/✓NAS-kolumnen härleds ur exakt de missing-listor kopieringen
+  byggs av (`absPathSet`), och NAS-kolumnen döljs helt när NAS inte är
+  tillgänglig — inga falska bockar. `lineEditor.insert` använder
+  full-slice-uttryck (ingen aliasing), config-byten sker på kopior.
+  Headless-körning i tmux vid 120×40 och 80×24: korrekt rendering, inga
+  radbrytningar, help/settings/devices-skärmarna fungerar.
+
+### Testsvitens hörnfallstäckning
+
+~150 beteendedrivna tester. Täckning: kärnpaketen 67–88 % (copyop 68 %,
+scan 87 %, config 87 %, verify 86 %, progress 87 %); TUI 33 % och preview 44 %
+är rendering respektive exiftool-beroende kod — rimligt. Sviten täcker de
+svåra hörnen: kollisioner (`_N`-varianter åt båda håll), stall-detektorns
+gränser, cancel före/mitt i batch, sena sends efter kanalstängning,
+unreadable-kedjan, HEIF-avvisningsfallen, flerraders-arrayer i config-save,
+och `TestCopyAndVerifyAgree` som låser copy/verify-symmetrin. Luckor utan
+bugg bakom: `safeCreate`-uttömning (9999 varianter, praktiskt onåbar),
+0-bytefallet (nu empiriskt provat, kunde bli test), och fuzzning — den sista
+är stängd i och med `capture_fuzz_test.go`.
+
+### Slutsats efter det kompletterande passet
+
+Omdömet från första passet står sig: datavägarna är säkra och nu genomlästa
+till 100 %, liksom hela UI-lagret. Det enda nya fyndet med produktionsrelevans
+är **N1** — rapporteringssidans kvarvarande variant av H2 — som bör åtgärdas
+med samma lilla `isDir`-regel. N2–N4 är medvetna avvägningar att lämna eller
+städa vid tillfälle.
