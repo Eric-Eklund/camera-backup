@@ -138,6 +138,102 @@ func TestRunSync_NothingToCopySucceeds(t *testing.T) {
 	}
 }
 
+// ── The SSD is the source of a sync, and must actually be there ─────────────
+
+// An unmounted SSD used to scan as empty, so every file looked already-synced
+// and the run ended on "NAS is already up to date" — a statement about a
+// comparison that never happened. The parent-exists rule (RootAvailable) is
+// for destinations; an empty mount point as a *source* has to fail loudly.
+func TestRunSync_UnmountedSSDExitsNonZero(t *testing.T) {
+	f := newSyncFixture(t)
+	// The classic shape: the mount point's parent exists, the mount does not.
+	mnt := filepath.Join(t.TempDir(), "mnt")
+	if err := os.MkdirAll(mnt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.SSDPhotos = filepath.Join(mnt, "ssd-photos")
+	f.cfg.SSDVideos = filepath.Join(mnt, "ssd-videos")
+
+	err := runSync(f.cfg, silentLogger(), syncOptions{order: config.OrderVideosFirst})
+	if err == nil {
+		t.Fatal(`runSync reported success against an SSD it never read`)
+	}
+	if !strings.Contains(err.Error(), "SSD not accessible") {
+		t.Errorf("error = %v, want it to say the SSD is not accessible", err)
+	}
+}
+
+// One missing category root: the other category is still synced — those files
+// are worth pushing — but the run must not end reading as a finished sync.
+func TestRunSync_MissingCategoryRootSyncsTheOtherAndStillFails(t *testing.T) {
+	dir := t.TempDir()
+	ssdPhotos := filepath.Join(dir, "ssd-photos")
+	datePath := filepath.Join("2026", "2026-03", "2026-03-25")
+	writeAt(t, filepath.Join(ssdPhotos, datePath, "DSC_0001.NEF"), "a photograph")
+	nas := filepath.Join(dir, "nas")
+	if err := os.MkdirAll(nas, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Source:          filepath.Join(dir, "card"),
+		SSDPhotos:       ssdPhotos,
+		SSDVideos:       filepath.Join(dir, "ssd-videos"), // never created
+		NASPhotos:       filepath.Join(nas, "photos"),
+		NASVideos:       filepath.Join(nas, "videos"),
+		FileExtensions:  []string{".NEF", ".MOV"},
+		VideoExtensions: []string{".MOV"},
+	}
+
+	err := runSync(cfg, silentLogger(), syncOptions{order: config.OrderVideosFirst})
+	if err == nil {
+		t.Fatal("runSync reported success although the videos root was never compared")
+	}
+	if !strings.Contains(err.Error(), "videos") || !strings.Contains(err.Error(), "incomplete") {
+		t.Errorf("error = %v, want it to name the videos root and say the sync is incomplete", err)
+	}
+
+	// The photos were synced all the same.
+	copied := filepath.Join(cfg.NASPhotos, datePath, "DSC_0001.NEF")
+	if _, statErr := os.Stat(copied); statErr != nil {
+		t.Errorf("the photo was not synced: %v", statErr)
+	}
+}
+
+// A category excluded by --photos-only was never this run's job, so its root
+// being absent is not this run's failure.
+func TestRunSync_FilteredOutMissingRootIsNotAFailure(t *testing.T) {
+	dir := t.TempDir()
+	ssdPhotos := filepath.Join(dir, "ssd-photos")
+	datePath := filepath.Join("2026", "2026-03", "2026-03-25")
+	writeAt(t, filepath.Join(ssdPhotos, datePath, "DSC_0001.NEF"), "a photograph")
+	nas := filepath.Join(dir, "nas")
+	if err := os.MkdirAll(nas, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Source:          filepath.Join(dir, "card"),
+		SSDPhotos:       ssdPhotos,
+		SSDVideos:       filepath.Join(dir, "ssd-videos"), // never created
+		NASPhotos:       filepath.Join(nas, "photos"),
+		NASVideos:       filepath.Join(nas, "videos"),
+		FileExtensions:  []string{".NEF", ".MOV"},
+		VideoExtensions: []string{".MOV"},
+	}
+
+	err := runSync(cfg, silentLogger(), syncOptions{photosOnly: true, order: config.OrderVideosFirst})
+	if err != nil {
+		t.Errorf("runSync = %v, want nil — the missing videos root was excluded by --photos-only", err)
+	}
+}
+
+// A mounted SSD with both roots in place keeps working exactly as before.
+func TestRunSync_MountedSSDStillSucceeds(t *testing.T) {
+	f := newSyncFixture(t)
+	if err := runSync(f.cfg, silentLogger(), syncOptions{order: config.OrderVideosFirst}); err != nil {
+		t.Fatalf("runSync: %v", err)
+	}
+}
+
 // ── The unreadable-source exit status ───────────────────────────────────────
 
 func TestIncompleteSourceError(t *testing.T) {

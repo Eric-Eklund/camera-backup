@@ -83,6 +83,25 @@ func Run(cfg *config.Config, logger *log.Logger, verbose bool) error {
 	if bad != 0 || !outcome.Clean() {
 		fmt.Println()
 	}
+	return runError(bad, total, outcome)
+}
+
+// runError decides the command's exit status. The summary above is for whoever
+// is watching the terminal; a cron job or a `verify && …` chain sees only this.
+// A pass that found mismatches, or that never read part of the source, must not
+// exit 0 — "verify succeeded" would then stand for a backup that is corrupt, or
+// for photographs nothing could open.
+//
+// An unmounted destination alone stays exit 0: skipping it is the documented
+// "skipped, not failed" behaviour (verifying camera vs SSD away from the NAS is
+// a normal run, not a broken one), and the summary names what went unchecked.
+func runError(bad, total int, outcome Outcome) error {
+	if bad > 0 {
+		return fmt.Errorf("%d of %d file(s) failed verification — the backup is not confirmed", bad, total)
+	}
+	if n := len(outcome.Unreadable); n > 0 {
+		return fmt.Errorf("%d source path(s) could not be read — those files were never verified; do not format the card", n)
+	}
 	return nil
 }
 

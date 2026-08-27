@@ -205,3 +205,9 @@ false`), så att sökvägen alltid speglar senaste körningen.
 (en returnerad error, en tillgänglighetskoll, en valideringsregel) och alla
 tre har naturliga hem i befintliga testfiler. M1–M3 bör beslutas aktivt
 (fix eller dokumenterat val). L-punkterna är förbättringar utan brådska.
+
+> **Status 2026-08-27:** H1–H3 är åtgärdade på denna branch, med tester
+> (`internal/verify/exitstatus_test.go`, nya `TestRunSync_*`-fall i
+> `cmd/camera-backup/main_test.go`, `TestLoad_RejectsEmptyFileExtensions`).
+> Omonterad destination vid `verify` behåller medvetet exit 0 — det
+> dokumenterade "skipped, not failed"-fallet. M- och L-punkterna kvarstår.

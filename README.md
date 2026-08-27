@@ -53,9 +53,18 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
   the run says so loudly and **exits non-zero** — a directory the tool could not
   open holds photographs nothing has backed up, and that must never look like a
   finished backup
-- **Every command exits non-zero when files failed.** That includes `sync` and
-  the SSD → NAS half of `copy`, so a script or a timer chaining on success
-  cannot mistake a partial run for a complete one
+- **Every command exits non-zero when files failed.** That includes `sync`,
+  the SSD → NAS half of `copy`, and `verify` when any file mismatches or goes
+  missing — so a script or a timer chaining on success cannot mistake a
+  partial or corrupt run for a complete one
+- **`sync` refuses to run against an SSD that is not mounted.** An empty mount
+  point scans as empty, which would make every file look already-synced —
+  "NAS is already up to date" must never describe a comparison that did not
+  happen. A single missing category root syncs the other category and still
+  exits non-zero
+- **An empty `file_extensions` list is rejected at load time.** A scan that
+  matches nothing would report 0 files found, 0 missing and "All 0 files
+  verified OK" — a complete backup that never looked at anything
 
 ---
 
@@ -321,6 +330,13 @@ stand for something that was never looked at:
 Paths on the card it could not read are reported the same way, and for the same
 reason: those files were never hashed, so they appear nowhere in the count of
 files that passed.
+
+The exit status says the same thing the summary does: mismatches, missing
+copies and unreadable card paths all end the command non-zero, so
+`camera-backup verify && …` can be trusted from a script or a timer. Only the
+unmounted-destination skip above stays exit 0 — verifying the card against the
+SSD while away from the NAS is a normal run, not a failed one, and the summary
+names what went unchecked.
 
 With `direct_to_nas` the local SSD is **not** treated as a destination, even
 when `ssd_photos`/`ssd_videos` are still set for `sync` to use. Nothing is ever

@@ -81,6 +81,7 @@ func TestLoad_MergedRoots(t *testing.T) {
 source     = "/cam"
 ssd_photos = "/ssd/All"
 ssd_videos = "/ssd/All"
+file_extensions = [".NEF"]
 `)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -106,6 +107,7 @@ func TestNASWriteTimeout_FromConfig(t *testing.T) {
 source     = "/cam"
 ssd_photos = "/ssd/Photos"
 ssd_videos = "/ssd/Videos"
+file_extensions = [".NEF"]
 nas_write_timeout_seconds = 15
 `)
 	cfg, err := config.Load(path)
@@ -129,6 +131,7 @@ func TestSyncOrder_FromConfig(t *testing.T) {
 source     = "/cam"
 ssd_photos = "/ssd/Photos"
 ssd_videos = "/ssd/Videos"
+file_extensions = [".NEF"]
 nas_sync_order = "size-asc"
 `)
 	cfg, err := config.Load(path)
@@ -137,6 +140,32 @@ nas_sync_order = "size-asc"
 	}
 	if got := cfg.SyncOrder(); got != config.OrderSizeAsc {
 		t.Errorf("SyncOrder() = %q, want %q", got, config.OrderSizeAsc)
+	}
+}
+
+// An empty file_extensions list makes every scan see nothing, at which point
+// status, copy and verify all agree the backup is complete without having
+// looked at a single file. The TUI's form already refuses it; Load has to as
+// well, or a hand-edited config.toml walks straight past the safety nets.
+func TestLoad_RejectsEmptyFileExtensions(t *testing.T) {
+	for name, extLine := range map[string]string{
+		"key absent":     "",
+		"explicit empty": "file_extensions = []\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTempConfig(t, `
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+`+extLine)
+			_, err := config.Load(path)
+			if err == nil {
+				t.Fatal("Load accepted a config whose scans would see nothing")
+			}
+			if !strings.Contains(err.Error(), "file_extensions") {
+				t.Errorf("error = %v, want it to name file_extensions", err)
+			}
+		})
 	}
 }
 
@@ -213,6 +242,7 @@ source        = "/cam"
 nas_photos    = "/nas/Photos"
 nas_videos    = "/nas/Videos"
 direct_to_nas = true
+file_extensions = [".NEF"]
 `)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -239,6 +269,7 @@ ssd_videos    = "/ssd/Videos"
 nas_photos    = "/nas/Photos"
 nas_videos    = "/nas/Videos"
 direct_to_nas = true
+file_extensions = [".NEF"]
 `)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -345,6 +376,7 @@ extra_sources = ["/run/media/user/EXT-SSD"]
 nas_photos    = "/nas/Photos"
 nas_videos    = "/nas/Videos"
 direct_to_nas = true
+file_extensions = [".NEF"]
 `)
 	cfg, err := config.Load(path)
 	if err != nil {

@@ -303,6 +303,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: list_preview must be %q, %q, %q or %q",
 			PreviewAuto, PreviewKitty, PreviewBlocks, PreviewOff)
 	}
+	// An empty extension list is not "no filter" — it is a scan that sees
+	// nothing. Every command would then agree the backup is complete: 0 files
+	// found, 0 missing, "All 0 files verified OK" — while never looking at a
+	// single photograph. The TUI's settings form rejects this at the field
+	// level; this is the backstop for a hand-edited config.toml.
+	if len(c.FileExtensions) == 0 {
+		return fmt.Errorf("config: file_extensions must list at least one extension — an empty list would make every scan see nothing and report the backup as complete")
+	}
 	return nil
 }
 
