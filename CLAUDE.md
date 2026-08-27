@@ -29,6 +29,120 @@ go run ./cmd/lumen --config testdata/config-direct.toml dump
 go run ./cmd/lumen --config testdata/config-direct.toml tui
 ```
 
+## Commit and pull request conventions
+
+Every commit message and every pull request in this repository — title, body and
+footers — MUST be written in **English**, and MUST follow the Conventional
+Commits format:
+
+```
+<type>[optional scope]: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+A pull request is described exactly like a commit: **the PR title is the
+`<type>[scope]: <description>` line** and the PR body is the commit body and
+footers. Nothing else is accepted — a PR titled `Fix the thing` is as wrong as a
+commit with that message.
+
+### The rules
+
+The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
+RECOMMENDED, MAY and OPTIONAL are to be interpreted as described in
+[RFC 2119](https://www.ietf.org/rfc/rfc2119.txt).
+
+1. Commits MUST be prefixed with a type, which consists of a noun — `feat`,
+   `fix`, etc. — followed by the OPTIONAL scope, an OPTIONAL `!`, and a REQUIRED
+   terminal colon and space.
+2. The type `feat` MUST be used when a commit adds a new feature.
+3. The type `fix` MUST be used when a commit represents a bug fix.
+4. A scope MAY be provided after the type. A scope MUST consist of a noun
+   describing a section of the codebase, surrounded by parentheses, e.g.
+   `fix(scan):`.
+5. A description MUST immediately follow the colon and space after the
+   type/scope prefix. The description is a short summary of the code changes,
+   e.g. `fix: skip source files that are still being written`.
+6. A longer body MAY be provided after the short description, giving additional
+   context. The body MUST begin one blank line after the description.
+7. The body is free-form and MAY consist of any number of newline-separated
+   paragraphs.
+8. One or more footers MAY be provided one blank line after the body. Each
+   footer MUST consist of a word token, followed by either a `:<space>` or a
+   `<space>#` separator, followed by a string value (the
+   [git trailer convention](https://git-scm.com/docs/git-interpret-trailers)).
+9. A footer's token MUST use `-` in place of whitespace, e.g. `Acked-by` — this
+   is what separates the footer section from a multi-paragraph body. An
+   exception is made for `BREAKING CHANGE`, which MAY also be used as a token.
+10. A footer's value MAY contain spaces and newlines; parsing MUST terminate
+    when the next valid footer token/separator pair is observed.
+11. Breaking changes MUST be indicated in the type/scope prefix, or as an entry
+    in the footer.
+12. If included as a footer, a breaking change MUST consist of the uppercase
+    text `BREAKING CHANGE`, followed by a colon, a space and a description, e.g.
+    `BREAKING CHANGE: config.toml keys ssd_photos and ssd_videos are now
+    optional`.
+13. If included in the type/scope prefix, a breaking change MUST be indicated by
+    a `!` immediately before the `:`. If `!` is used, `BREAKING CHANGE:` MAY be
+    omitted from the footer, and the description SHALL describe the breaking
+    change.
+14. Types other than `feat` and `fix` MAY be used, e.g. `docs: update ref docs`.
+15. The units of information that make up a Conventional Commit MUST NOT be
+    treated as case-sensitive, with the exception of `BREAKING CHANGE`, which
+    MUST be uppercase.
+16. `BREAKING-CHANGE` MUST be synonymous with `BREAKING CHANGE` when used as a
+    footer token.
+
+### Types used here
+
+`feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`,
+`revert`. Anything that changes behaviour a user can observe is `feat` or `fix`;
+`refactor` means the behaviour is provably unchanged.
+
+### Scopes used here
+
+The scope is a section of the codebase, usually a package: `config`, `scan`,
+`copyop`, `checksum`, `status`, `verify`, `preview`, `progress`, `devices`,
+`tui`, `ui`, `cli` (for `cmd/lumen`), `testdata`. Omit the scope when a change
+genuinely spans the whole program.
+
+### Examples
+
+```
+fix(scan): confirm a cross-date name+size match against capture time
+
+Three cards all number their first frame DSC_0001, and two of those frames
+can share a byte-exact size. Trusting the basename+size probe alone silently
+skipped a photo that was never backed up.
+
+MissingFromDest now reads the capture times of the ambiguous twins only, so a
+destination whose layout already matches still costs zero reads.
+```
+
+```
+feat(tui): pick the source device from the main screen
+```
+
+```
+fix(cli)!: exit non-zero when a run did not finish the job
+
+BREAKING CHANGE: sync now returns an error instead of printing a warning, so
+a cron job that relied on exit 0 after a partial SSD→NAS run will start
+failing — which is the point.
+```
+
+### What this does not change
+
+- Commits made before this convention was adopted are left alone; history is not
+  rewritten to match.
+- The description says what the change does, not what was asked for, and is
+  written in the imperative — `fix(verify): report unmounted roots`, not
+  `fixed` or `fixes`.
+- Squash-merging a pull request MUST leave a message that still follows the
+  format, which it does when the PR title does.
+
 ## Architecture
 
 Three-stage incremental backup pipeline: **Camera → SSD → NAS**, plus a
