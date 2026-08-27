@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/scan"
 )
 
 func TestRunError_MismatchesAreAnError(t *testing.T) {

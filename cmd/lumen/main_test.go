@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/scan"
 )
 
 // These tests are about exit status, which is the only thing a cron job, a
-// systemd timer or `camera-backup sync && notify-send done` can see. A command
+// systemd timer or `lumen sync && notify-send done` can see. A command
 // that prints a warning and returns nil tells all of them that the backup
 // finished.
 
@@ -231,6 +231,57 @@ func TestRunSync_MountedSSDStillSucceeds(t *testing.T) {
 	f := newSyncFixture(t)
 	if err := runSync(f.cfg, silentLogger(), syncOptions{order: config.OrderVideosFirst}); err != nil {
 		t.Fatalf("runSync: %v", err)
+	}
+}
+
+// ── First run: only the TUI may start without a config ──────────────────────
+
+func TestLoadOrFirstRun_MissingFileStartsFirstRun(t *testing.T) {
+	cfg, firstRun, err := loadOrFirstRun(filepath.Join(t.TempDir(), "config.toml"))
+	if err != nil {
+		t.Fatalf("loadOrFirstRun: %v", err)
+	}
+	if !firstRun {
+		t.Fatal("firstRun = false for a config.toml that does not exist")
+	}
+	if len(cfg.FileExtensions) == 0 {
+		t.Error("the first-run draft has no file extensions — every field would need typing")
+	}
+}
+
+// A file that exists but does not load is still an error: silently starting
+// over with defaults would hide whatever the user meant to have in it.
+func TestLoadOrFirstRun_BrokenConfigStaysAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("source = [not valid toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, firstRun, err := loadOrFirstRun(path); err == nil || firstRun {
+		t.Fatalf("loadOrFirstRun = firstRun:%v err:%v — a broken config must stay an error", firstRun, err)
+	}
+}
+
+func TestLoadOrFirstRun_ValidConfigLoadsNormally(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(`
+source     = "/cam"
+ssd_photos = "/ssd/Photos"
+ssd_videos = "/ssd/Videos"
+file_extensions = [".NEF"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, firstRun, err := loadOrFirstRun(path)
+	if err != nil {
+		t.Fatalf("loadOrFirstRun: %v", err)
+	}
+	if firstRun {
+		t.Error("firstRun = true although the config loaded")
+	}
+	if cfg.Source != "/cam" {
+		t.Errorf("source = %q, want the configured value", cfg.Source)
 	}
 }
 

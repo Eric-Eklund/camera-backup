@@ -129,9 +129,9 @@ verify – expected result
   VID_0001.MOV   OK
 
 Run:
-  go run ./cmd/camera-backup --config testdata/config.toml status
-  go run ./cmd/camera-backup --config testdata/config.toml copy
-  go run ./cmd/camera-backup --config testdata/config.toml verify -v
+  go run ./cmd/lumen --config testdata/config.toml status
+  go run ./cmd/lumen --config testdata/config.toml copy
+  go run ./cmd/lumen --config testdata/config.toml verify -v
 
 Reset:
   rm -rf testdata/camera testdata/ssd testdata/nas && go run testdata/make_testdata.go

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/config"
 )
 
 // fieldKind describes how one settings row is edited.

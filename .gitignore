@@ -1,6 +1,6 @@
 # Binaries
-/camera-backup
-camera-backup.exe
+/lumen
+lumen.exe
 
 # Local configuration (copy config-template.toml → config.toml)
 /config.toml

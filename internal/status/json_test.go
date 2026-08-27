@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/status"
 )
 
 func (f *fixture) report() status.Report {

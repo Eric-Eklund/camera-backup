@@ -1,4 +1,4 @@
-# Produktionsgranskning — camera-backup
+# Produktionsgranskning — Lumen
 
 **Datum:** 2026-08-27 (kompletterande pass samma dag — se sista avsnittet)
 **Omfattning:** Hela systemet, med extra fokus på de senaste dagarnas tillskott
@@ -49,7 +49,7 @@ verify exit: 0
 README lovar *"Every command exits non-zero when files failed"* och
 arbetsflödet föreslår `verify` efter `sync` och "monthly" — dvs. exakt de
 lägen där en cron/skript bara har exit-koden att gå på. Ett skript i stil med
-`camera-backup verify && notify "backup OK"` rapporterar i dag en korrupt
+`lumen verify && notify "backup OK"` rapporterar i dag en korrupt
 backup som frisk. TUI:n påverkas inte (den läser bad-räknaren själv).
 
 **Förslag:** returnera fel från `Run` när `bad > 0`, och överväg detsamma (eller
@@ -58,7 +58,7 @@ allt är inte ett rent resultat, vilket är exakt resonemanget bakom `Outcome`.
 
 ### H2. `sync` med omonterad SSD rapporterar "NAS is already up to date"
 
-`runSync` (`cmd/camera-backup/main.go:593-692`) kontrollerar bara att NAS är
+`runSync` (`cmd/lumen/main.go:593-692`) kontrollerar bara att NAS är
 tillgänglig. SSD-rötterna skannas via `WalkDual`, som tyst ger tomma listor
 när roten inte finns — och en tom källa betyder "inget saknas".
 
@@ -211,7 +211,7 @@ tre har naturliga hem i befintliga testfiler. M1–M3 bör beslutas aktivt
 
 > **Status 2026-08-27:** H1–H3 är åtgärdade (PR #22, mergad), med tester
 > (`internal/verify/exitstatus_test.go`, nya `TestRunSync_*`-fall i
-> `cmd/camera-backup/main_test.go`, `TestLoad_RejectsEmptyFileExtensions`).
+> `cmd/lumen/main_test.go`, `TestLoad_RejectsEmptyFileExtensions`).
 > Omonterad destination vid `verify` behåller medvetet exit 0 — det
 > dokumenterade "skipped, not failed"-fallet. M- och L-punkterna kvarstår.
 

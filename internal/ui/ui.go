@@ -10,7 +10,7 @@ import (
 
 	"github.com/fatih/color"
 
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/scan"
 )
 
 // unreadableListLimit caps how many unreadable paths are printed before the

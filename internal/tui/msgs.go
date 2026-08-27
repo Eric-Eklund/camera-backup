@@ -3,10 +3,10 @@ package tui
 import (
 	"image"
 
-	"github.com/Eric-Eklund/camera-backup/internal/copyop"
-	"github.com/Eric-Eklund/camera-backup/internal/devices"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
-	"github.com/Eric-Eklund/camera-backup/internal/verify"
+	"github.com/Eric-Eklund/lumen/internal/copyop"
+	"github.com/Eric-Eklund/lumen/internal/devices"
+	"github.com/Eric-Eklund/lumen/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/verify"
 )
 
 type statusReadyMsg struct {

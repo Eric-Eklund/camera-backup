@@ -1,4 +1,4 @@
-# camera-backup
+# Lumen
 
 A CLI tool for safely backing up camera media (Nikon Z6 III and similar) from memory cards to a local SSD and a remote NAS — incrementally and with SHA256 verification. Cards and external drives can also be dumped straight to the NAS, skipping the local SSD.
 
@@ -11,26 +11,26 @@ Built in Go. Never deletes or overwrites source files.
 ### Daily backup (e.g. on vacation without reliable network)
 
 1. Connect camera via USB-C (mounts as a drive, e.g. `/media/eric/NIKON`)
-2. `camera-backup status` — see what needs copying and verify there is enough space
-3. `camera-backup copy` — copies camera → SSD with SHA256 verification, then asks whether to continue to NAS (disconnect the camera first)
-4. `camera-backup sync` — copies SSD → NAS when network is available (videos first); run overnight if needed
-5. `camera-backup verify` — SHA256 check across all destinations; run after sync to confirm integrity
+2. `lumen status` — see what needs copying and verify there is enough space
+3. `lumen copy` — copies camera → SSD with SHA256 verification, then asks whether to continue to NAS (disconnect the camera first)
+4. `lumen sync` — copies SSD → NAS when network is available (videos first); run overnight if needed
+5. `lumen verify` — SHA256 check across all destinations; run after sync to confirm integrity
 
 ### At home / full sync
 
-1. `camera-backup copy` — camera → SSD (verified) then SSD → NAS
-2. `camera-backup verify` — confirm everything matches
+1. `lumen copy` — camera → SSD (verified) then SSD → NAS
+2. `lumen verify` — confirm everything matches
 
 ### Straight to the NAS (no local SSD)
 
 Plug in a memory card or an external SSD and push it to the NAS without a local
 staging copy:
 
-1. `camera-backup dump` — source → NAS, SHA256-verified
-2. `camera-backup verify` — confirm everything matches
+1. `lumen dump` — source → NAS, SHA256-verified
+2. `lumen verify` — confirm everything matches
 
 Set `direct_to_nas = true` in `config.toml` to make this the default for
-`camera-backup copy` and for `[y]` in the TUI. See
+`lumen copy` and for `[y]` in the TUI. See
 [Dumping straight to the NAS](#dumping-straight-to-the-nas).
 
 ---
@@ -44,7 +44,7 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
 - Source files are opened **read-only**
 - Destination files are **never overwritten** — if a filename already exists, the new file is saved with a `_1`, `_2`, … suffix and a warning is printed
 - Memory cards are always formatted manually in-camera
-- Copy order is `Camera → SSD → NAS` by default. `camera-backup dump` (or
+- Copy order is `Camera → SSD → NAS` by default. `lumen dump` (or
   `direct_to_nas = true`) copies the card straight to the NAS instead — those
   copies are always SHA256-verified, because the NAS copy is then the only copy
 - `copy`, `dump` and `sync` check available disk space before starting and abort if there is not enough room
@@ -70,7 +70,7 @@ Set `direct_to_nas = true` in `config.toml` to make this the default for
 
 ## Commands
 
-### `camera-backup status`
+### `lumen status`
 
 Quick check — compares by shoot date, filename and file size rather than hashing. Shows how much data needs to be copied and whether there is enough free space on each destination.
 
@@ -79,7 +79,7 @@ backed up. When a copy turns up under a *different* date — an older backup, or
 file with no capture metadata whose timestamp was rewritten — the match is
 confirmed against the capture time before the source is skipped, so two cards
 that both number a frame `DSC_0001` are never confused with each other. Use
-`camera-backup verify` when you want the full SHA256 comparison.
+`lumen verify` when you want the full SHA256 comparison.
 
 ```
   Devices
@@ -116,7 +116,7 @@ than the whole device.
 The same scan as a single JSON object on stdout, for a status bar or a cron job:
 
 ```bash
-camera-backup status --json
+lumen status --json
 ```
 
 ```json
@@ -152,7 +152,7 @@ A waybar module is then a one-liner:
 ```jsonc
 // ~/.config/waybar/config
 "custom/backup": {
-  "exec": "camera-backup status --json | jq -c '{text: (if .counts.missing_on_nas == null then \"?\" else \"\(.counts.missing_on_nas) → NAS\" end), class: (if .nas.photos.available then \"ok\" else \"offline\" end)}'",
+  "exec": "lumen status --json | jq -c '{text: (if .counts.missing_on_nas == null then \"?\" else \"\(.counts.missing_on_nas) → NAS\" end), class: (if .nas.photos.available then \"ok\" else \"offline\" end)}'",
   "return-type": "json",
   "interval": 60
 }
@@ -163,7 +163,7 @@ running starts a second scan of the same devices — safe, since everything is
 read read-only, but slow over a NAS share. To follow a copy as it runs, use
 [`--progress-json`](#--progress-json-copy-sync-dump) instead.
 
-### `camera-backup copy`
+### `lumen copy`
 
 Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verification after each file (SSD is the source of truth). Phase 2 copies SSD → NAS quickly without per-file verification — run `verify` afterwards to confirm integrity.
 
@@ -198,23 +198,23 @@ Phase 1 copies camera → SSD with a 4 MB buffer, `fsync`, and SHA256 verificati
   ✅  13 file(s) copied.
 ```
 
-If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly after Phase 1. Run `camera-backup sync` later to push to NAS — files already there are skipped automatically. If files *did* fail to copy, the command exits non-zero.
+If the NAS is not reachable (VPN down, drive not mapped), the tool exits cleanly after Phase 1. Run `lumen sync` later to push to NAS — files already there are skipped automatically. If files *did* fail to copy, the command exits non-zero.
 
 If part of the card could not be read, everything reachable is still copied —
 those files are worth having — but the run ends on an error rather than on
 "copied and verified", so nothing downstream treats the card as safe to format.
 
-### `camera-backup dump`
+### `lumen dump`
 
 Copies files missing from the NAS straight from the source device, bypassing the
 local SSD. Use it when you plug in a card or an external drive and want the
 files on the NAS without a local staging copy.
 
 ```
-camera-backup dump                    # all missing files, videos first
-camera-backup dump --videos-only     # only video files (-v)
-camera-backup dump --photos-only     # only photo files (-p)
-camera-backup dump --order=size-asc  # smallest files first, regardless of type
+lumen dump                    # all missing files, videos first
+lumen dump --videos-only     # only video files (-v)
+lumen dump --photos-only     # only photo files (-p)
+lumen dump --order=size-asc  # smallest files first, regardless of type
 ```
 
 Files land in the same `year/month/day` layout as a staged backup, so a card
@@ -234,15 +234,15 @@ a slow link is never cut short.
 `dump` works whether or not `direct_to_nas` is set — the setting only decides
 what `copy` and the TUI do by default.
 
-### `camera-backup sync`
+### `lumen sync`
 
 Copies files missing from NAS from the SSD. No camera required. By default videos are transferred before photos.
 
 ```
-camera-backup sync                    # all missing files, videos first
-camera-backup sync --videos-only     # only video files (-v)
-camera-backup sync --photos-only     # only photo files (-p)
-camera-backup sync --order=size-asc  # smallest files first, regardless of type
+lumen sync                    # all missing files, videos first
+lumen sync --videos-only     # only video files (-v)
+lumen sync --photos-only     # only photo files (-p)
+lumen sync --order=size-asc  # smallest files first, regardless of type
 ```
 
 Use this when network becomes available after a `copy` run, or to push only videos when bandwidth is limited.
@@ -256,7 +256,7 @@ anything that wants to follow along — a status bar, a script waiting for the
 backup to finish, a phone notification:
 
 ```bash
-camera-backup copy --progress-json /run/user/1000/camera-backup.json
+lumen copy --progress-json /run/user/1000/lumen.json
 ```
 
 ```json
@@ -296,9 +296,9 @@ camera-backup copy --progress-json /run/user/1000/camera-backup.json
   removed, so they are not on the disk. `files.failed` records it instead.
 
 Scanning the devices to ask what is *left* is a different question, answered by
-`camera-backup status --json` without a copy running.
+`lumen status --json` without a copy running.
 
-### `camera-backup verify`
+### `lumen verify`
 
 Deep integrity check — reads every file and computes SHA256. Slow but thorough. Run after `sync` or monthly.
 
@@ -333,7 +333,7 @@ files that passed.
 
 The exit status says the same thing the summary does: mismatches, missing
 copies and unreadable card paths all end the command non-zero, so
-`camera-backup verify && …` can be trusted from a script or a timer. Only the
+`lumen verify && …` can be trusted from a script or a timer. Only the
 unmounted-destination skip above stays exit 0 — verifying the card against the
 SSD while away from the NAS is a normal run, not a failed one, and the summary
 names what went unchecked.
@@ -349,7 +349,7 @@ the authority (the card, or the SSD when no card is connected), so verifying one
 card confirms that card's photos, not the whole NAS. And it only sees extensions
 listed in `file_extensions` — the same blind spot `status` and `copy` have.
 
-### `camera-backup devices`
+### `lumen devices`
 
 Lists the filesystems mounted right now — card readers, USB drives, internal
 disks and network shares — so the mount point of a new card can be copied into
@@ -375,7 +375,7 @@ Discovery reads `/proc/self/mountinfo` and `/sys/class/block`; it is Linux-only,
 like the rest of the tool. The TUI shows the same list on its device screen
 (`d`), where a device can be picked outright instead of copied by hand.
 
-### `camera-backup tui`
+### `lumen tui`
 
 Interactive terminal UI wrapping all commands. Shows device availability, a
 year → month → day file tree with per-file SSD/NAS sync status, and runs
@@ -408,6 +408,9 @@ copy/sync/verify with live parallel progress bars.
   picks the mode; the panel also widens with the terminal (34 → 44 → 54
   columns)
 - `c` opens a **settings screen** that edits config.toml in place — see below
+- Started with **no config.toml at all**, the TUI opens on that settings
+  screen instead: fill in the paths and the first save creates the file — see
+  [Configuration](#configuration)
 - `d` opens a **device screen** listing everything mounted, so a different card
   or drive can be picked as the source mid-session — see below
 - Devices are watched — plugging in the SD card (or any `extra_sources` device)
@@ -493,7 +496,7 @@ the transfer order:
 Saving is a **surgical rewrite** of config.toml: each key is updated on the line
 where it already sits, so your comments, ordering and any keys this tool does
 not manage survive untouched. Keys the file did not have are appended under an
-`# Added by camera-backup` heading. The write is atomic, so an interrupted
+`# Added by lumen` heading. The write is atomic, so an interrupted
 save cannot leave a truncated config.
 
 Optional keys are written as their effective values — after the first save the
@@ -507,9 +510,17 @@ Copy `config-template.toml` to `config.toml` next to the binary (or pass
 `--config <path>`) and adjust the paths. `config.toml` is gitignored, so your
 local paths stay out of version control.
 
+**Or skip the file entirely and run `lumen tui`.** With no `config.toml` the
+TUI opens on its settings screen — the extension lists pre-filled from the
+template, the paths yours to set (press `d` on the source field to pick a
+mounted card or drive from a list). The first save creates the file and drops
+you straight into the scan; quitting before saving writes nothing. The CLI
+commands (`status`, `copy`, `sync`, …) still require the config to exist —
+they run unattended, and a setup screen has nobody to fill it in.
+
 Everything below can also be edited from the TUI's settings screen (`c`) instead
 of by hand — see [Settings screen](#settings-screen-c). To find the mount point
-of a card or drive, run `camera-backup devices` or pick it from the TUI's device
+of a card or drive, run `lumen devices` or pick it from the TUI's device
 screen (`d`) — see [Device screen](#device-screen-d).
 
 ```toml
@@ -562,7 +573,7 @@ Extensions are matched **case-insensitively** — `.NEF`, `.nef` and `.Nef` all 
 ### Dumping straight to the NAS
 
 `direct_to_nas = true` takes the local SSD out of the copy path: plug in a
-memory card or an external SSD, and `camera-backup copy` — or `[y]` in the TUI —
+memory card or an external SSD, and `lumen copy` — or `[y]` in the TUI —
 copies it straight to the NAS.
 
 ```toml
@@ -588,11 +599,11 @@ direct_to_nas = true
   drive that already holds a `year/month/day` tree lands in the same places on
   the NAS — even if copying the files onto that drive reset their timestamps.
 - **The SSD keys become optional.** Leave `ssd_photos`/`ssd_videos` out
-  entirely, or keep them so `camera-backup sync` can still push an existing SSD
+  entirely, or keep them so `lumen sync` can still push an existing SSD
   tree to the NAS. Either way, `copy` and the TUI bypass the SSD, and the SSD
   is shown as *bypassed* in `status` rather than missing.
 - **Per-run instead of permanent.** Leave the setting off and run
-  `camera-backup dump` when you want a direct copy — the setting only changes
+  `lumen dump` when you want a direct copy — the setting only changes
   the default for `copy` and the TUI.
 
 Only `direct_to_nas` needs `nas_photos`/`nas_videos` to be set; without a NAS
@@ -711,18 +722,18 @@ go run testdata/make_testdata.go
 Then run against it:
 
 ```bash
-go run ./cmd/camera-backup --config testdata/config.toml status
-go run ./cmd/camera-backup --config testdata/config.toml copy
-go run ./cmd/camera-backup --config testdata/config.toml verify -v
+go run ./cmd/lumen --config testdata/config.toml status
+go run ./cmd/lumen --config testdata/config.toml copy
+go run ./cmd/lumen --config testdata/config.toml verify -v
 ```
 
 `testdata/config-direct.toml` exercises the direct source → NAS path
 (`direct_to_nas = true`, no `ssd_*` keys) against the same testdata:
 
 ```bash
-go run ./cmd/camera-backup --config testdata/config-direct.toml status
-go run ./cmd/camera-backup --config testdata/config-direct.toml dump
-go run ./cmd/camera-backup --config testdata/config-direct.toml verify -v
+go run ./cmd/lumen --config testdata/config-direct.toml status
+go run ./cmd/lumen --config testdata/config-direct.toml dump
+go run ./cmd/lumen --config testdata/config-direct.toml verify -v
 ```
 
 It also lists `testdata/extdrive` in `extra_sources`; create that directory
@@ -741,12 +752,12 @@ rm -rf testdata/camera testdata/ssd testdata/nas && go run testdata/make_testdat
 Requires Go 1.26+. Linux only.
 
 ```bash
-git clone https://github.com/Eric-Eklund/camera-backup
-cd camera-backup
-go build -o camera-backup ./cmd/camera-backup
+git clone https://github.com/Eric-Eklund/lumen
+cd lumen
+go build -o lumen ./cmd/lumen
 ```
 
-Copy the `camera-backup` binary and your `config.toml` (created from
+Copy the `lumen` binary and your `config.toml` (created from
 `config-template.toml`) to a directory of your choice and run from any terminal. For RAW previews in the TUI, install `exiftool` (`sudo apt install libimage-exiftool-perl`).
 
 ---
@@ -754,8 +765,8 @@ Copy the `camera-backup` binary and your `config.toml` (created from
 ## Project structure
 
 ```
-camera-backup/
-├── cmd/camera-backup/
+lumen/
+├── cmd/lumen/
 │   └── main.go              # Entry point, subcommands, space check
 ├── internal/
 │   ├── config/              # TOML loading, extension matching, worker counts

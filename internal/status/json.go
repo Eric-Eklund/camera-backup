@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/config"
 )
 
 // The values Report.Compared can take: what the missing-file counts were

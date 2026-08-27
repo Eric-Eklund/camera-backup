@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,33 +15,33 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/copyop"
-	"github.com/Eric-Eklund/camera-backup/internal/devices"
-	"github.com/Eric-Eklund/camera-backup/internal/progress"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
-	"github.com/Eric-Eklund/camera-backup/internal/tui"
-	"github.com/Eric-Eklund/camera-backup/internal/ui"
-	"github.com/Eric-Eklund/camera-backup/internal/verify"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/copyop"
+	"github.com/Eric-Eklund/lumen/internal/devices"
+	"github.com/Eric-Eklund/lumen/internal/progress"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/tui"
+	"github.com/Eric-Eklund/lumen/internal/ui"
+	"github.com/Eric-Eklund/lumen/internal/verify"
 )
 
 func main() {
 	var configPath string
 
 	root := &cobra.Command{
-		Use:   "camera-backup",
+		Use:   "lumen",
 		Short: "Incremental camera backup with SHA256 verification",
 		Long: `Safely back up camera media from memory cards to a local SSD
 and a remote NAS — incrementally and with SHA256 verification.
 
 Typical workflow:
-  1. camera-backup status      — see what needs copying
-  2. camera-backup copy        — copy camera→SSD, pause, then SSD→NAS
-  3. camera-backup status      — final check before formatting cards in-camera
+  1. lumen status      — see what needs copying
+  2. lumen copy        — copy camera→SSD, pause, then SSD→NAS
+  3. lumen status      — final check before formatting cards in-camera
 
 To skip the local SSD entirely and dump a card or external drive straight to
-the NAS, run "camera-backup dump" — or set direct_to_nas = true in config.toml
+the NAS, run "lumen dump" — or set direct_to_nas = true in config.toml
 to make that the default for "copy" and the TUI.`,
 		// A failed run is not a usage mistake: printing the help text after
 		// "2 of 7 file(s) failed verification" scrolls the one line that
@@ -77,7 +79,7 @@ to make that the default for "copy" and the TUI.`,
 }
 
 // initLogger creates a timestamped log file in logs/ next to the binary,
-// falling back to ~/.local/state/camera-backup/logs when the binary's
+// falling back to ~/.local/state/lumen/logs when the binary's
 // directory is not writable (e.g. installed in /usr/local/bin).
 func initLogger() (*log.Logger, func(), error) {
 	exe, err := os.Executable()
@@ -91,13 +93,13 @@ func initLogger() (*log.Logger, func(), error) {
 		if homeErr != nil {
 			return nil, nil, err
 		}
-		stateDir := filepath.Join(home, ".local", "state", "camera-backup", "logs")
+		stateDir := filepath.Join(home, ".local", "state", "lumen", "logs")
 		if f, logPath, err = createLogFile(stateDir, stamp); err != nil {
 			return nil, nil, err
 		}
 	}
 	logger := log.New(f, "", log.LstdFlags)
-	logger.Printf("camera-backup started — log: %s", logPath)
+	logger.Printf("lumen started — log: %s", logPath)
 	return logger, func() { f.Close() }, nil
 }
 
@@ -405,7 +407,7 @@ func runCopy(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 	phase1Ran := false
 	if !sourceAvail {
 		ui.Yellow.Printf("  Camera not available at %s — skipping.\n", source)
-		ui.Yellow.Println("  To sync SSD → NAS only, run: camera-backup sync")
+		ui.Yellow.Println("  To sync SSD → NAS only, run: lumen sync")
 		logger.Println("Phase 1 skipped: camera not available")
 	} else if !ssdPhotosAvail && !ssdVideosAvail {
 		return fmt.Errorf("SSD not accessible at %s or %s", cfg.SSDPhotos, cfg.SSDVideos)
@@ -607,7 +609,7 @@ func runSync(cfg *config.Config, logger *log.Logger, opts syncOptions) error {
 		fmt.Println()
 		ui.Yellow.Printf("  NAS not available at %s or %s\n", cfg.NASPhotos, cfg.NASVideos)
 		ui.Yellow.Println("  Connect to VPN or ensure the NAS share is mounted, then run:")
-		ui.Dim.Println("    camera-backup sync")
+		ui.Dim.Println("    lumen sync")
 		logger.Println("SSD→NAS skipped: NAS not available")
 		return nil
 	}
@@ -844,6 +846,11 @@ func newTUICmd(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "tui",
 		Short: "Interactive TUI for camera backup",
+		Long: `Interactive TUI wrapping every command.
+
+Run on a machine with no config.toml yet, it opens on the settings screen:
+fill in the paths (the device screen fills the source from what is mounted),
+and the first save creates the file. Quitting before saving writes nothing.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger, cleanup, err := initLogger()
 			if err != nil {
@@ -851,16 +858,41 @@ func newTUICmd(configPath *string) *cobra.Command {
 			}
 			defer cleanup()
 
-			cfg, err := mustLoadConfig(*configPath)
+			cfg, firstRun, err := loadOrFirstRun(*configPath)
 			if err != nil {
 				return err
 			}
 
-			m := tui.New(cfg, logger, *configPath)
+			var m *tui.Model
+			if firstRun {
+				logger.Printf("no config at %s — starting first-run settings", *configPath)
+				m = tui.NewFirstRun(cfg, logger, *configPath)
+			} else {
+				m = tui.New(cfg, logger, *configPath)
+			}
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			m.SetProgram(p)
 			_, err = p.Run()
 			return err
 		},
 	}
+}
+
+// loadOrFirstRun loads the TUI's config. A config.toml that does not exist is
+// not an error there: the TUI opens on its settings screen instead, seeded
+// with the template defaults, and the first save creates the file. A file
+// that exists but does not load stays an error — silently replacing a broken
+// config with defaults would hide whatever the user meant to have in it.
+//
+// Only the TUI gets this treatment. The CLI commands keep requiring a config:
+// they run unattended, and a first-run screen has nobody to fill it in.
+func loadOrFirstRun(configPath string) (cfg *config.Config, firstRun bool, err error) {
+	cfg, err = mustLoadConfig(configPath)
+	if err == nil {
+		return cfg, false, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, false, err
+	}
+	return config.FirstRunDefaults(), true, nil
 }

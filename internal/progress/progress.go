@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/copyop"
+	"github.com/Eric-Eklund/lumen/internal/copyop"
 )
 
 // writeInterval is how often the file is rewritten while bytes are flowing.

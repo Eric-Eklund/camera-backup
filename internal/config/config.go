@@ -238,6 +238,18 @@ func isDir(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
+// FirstRunDefaults returns the configuration a fresh install starts from on
+// the TUI's first-run settings screen: the extension lists from
+// config-template.toml, with every path left for the user to fill in. It
+// deliberately does not pass Validate — it exists to be edited, and the first
+// save is what has to produce a valid config.
+func FirstRunDefaults() *Config {
+	return &Config{
+		FileExtensions:  []string{".MOV", ".NEF", ".JPG", ".MP4", ".HEIC", ".HIF"},
+		VideoExtensions: []string{".MOV", ".MP4"},
+	}
+}
+
 // DefaultConfigPath returns the path to config.toml next to the running binary.
 func DefaultConfigPath() (string, error) {
 	exe, err := os.Executable()

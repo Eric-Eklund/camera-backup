@@ -8,7 +8,7 @@ Linux is the only target platform.
 
 ```bash
 # Build
-go build -o camera-backup ./cmd/camera-backup
+go build -o lumen ./cmd/lumen
 
 # Run all tests
 go test ./...
@@ -18,15 +18,15 @@ go test ./internal/copyop -v
 
 # Generate synthetic test data, then run against it
 go run testdata/make_testdata.go
-go run ./cmd/camera-backup --config testdata/config.toml status
-go run ./cmd/camera-backup --config testdata/config.toml copy
-go run ./cmd/camera-backup --config testdata/config.toml verify -v
-go run ./cmd/camera-backup --config testdata/config.toml tui
+go run ./cmd/lumen --config testdata/config.toml status
+go run ./cmd/lumen --config testdata/config.toml copy
+go run ./cmd/lumen --config testdata/config.toml verify -v
+go run ./cmd/lumen --config testdata/config.toml tui
 
 # Direct Source → NAS path (direct_to_nas = true, no ssd_* keys)
-go run ./cmd/camera-backup --config testdata/config-direct.toml status
-go run ./cmd/camera-backup --config testdata/config-direct.toml dump
-go run ./cmd/camera-backup --config testdata/config-direct.toml tui
+go run ./cmd/lumen --config testdata/config-direct.toml status
+go run ./cmd/lumen --config testdata/config-direct.toml dump
+go run ./cmd/lumen --config testdata/config-direct.toml tui
 ```
 
 ## Architecture
@@ -48,7 +48,7 @@ Seven subcommands (Cobra CLI):
 
 | Package | Role |
 |---|---|
-| `cmd/camera-backup` | CLI entry point, `runCopy()` + `runSync()` + `runDirect()` orchestration, logging init |
+| `cmd/lumen` | CLI entry point, `runCopy()` + `runSync()` + `runDirect()` orchestration, logging init |
 | `internal/config` | TOML loading + `Validate()` + `Save()` (comment-preserving write-back), extension matching, `Category()` (photos/videos), worker counts, `ActiveSource()`, `SetSourceOverride()`, `SSDInUse()` |
 | `internal/progress` | `--progress-json`: a state document for the batch in flight, replaced atomically while it runs |
 | `internal/devices` | Linux mounted-device discovery (`/proc/self/mountinfo` + `/sys/class/block`) for the source picker |
@@ -269,7 +269,7 @@ from either side fails it, and the message says which side moved.
 ### Testing without camera files
 
 The RAW samples that prove the preview chain are megabytes each and live outside
-the repo: point `CAMERA_BACKUP_RAW_SAMPLES` at a directory of them and
+the repo: point `LUMEN_RAW_SAMPLES` at a directory of them and
 `TestThumbnailNEF` runs, otherwise it skips. Nothing else needs them —
 `firstDecodable` takes a tag→bytes getter, so the fallback order and the
 skip-an-empty-tag behaviour (the actual NEF bug) are tested with synthesised
@@ -337,7 +337,7 @@ as a `prune` command, built, and rejected for exactly this reason.)
 **A run that did not finish the job exits non-zero.** `sync` used to print a
 warning and return nil, so `copy`'s second phase could fail entirely while the
 command reported success — and a cron job, a systemd timer or
-`camera-backup sync && …` has nothing but the exit status to go on. Failures
+`lumen sync && …` has nothing but the exit status to go on. Failures
 during SSD→NAS now return an error, as phase 1 and `dump` always did, and a
 source the scan could only partly read does too (see above). The printed output
 is unchanged; it is the status that had to stop lying.
@@ -477,6 +477,17 @@ picker is open is exactly the case it exists for.
 (`internal/tui/settings.go` for the form, `renderSettings` in view.go for the
 rendering). `tui.New` takes the config path for it; `""` makes it read-only.
 
+The same screen is the **first-run experience**: `tui` started with no
+config.toml (`loadOrFirstRun` in main.go — only a missing file qualifies, a
+broken one stays an error) opens directly on it via `tui.NewFirstRun`, seeded
+with `config.FirstRunDefaults()` (the template's extension lists, no paths —
+deliberately invalid until edited, so an untouched draft cannot be saved). In
+first-run mode `esc`/`q` quit the program instead of falling back to a main
+screen that does not exist yet, with the usual second-press guard when dirty;
+the first successful save clears `Model.firstRun`, drops to `screenLoading`
+and continues into the normal flow. Nothing is written unless the user saves.
+The CLI commands keep requiring an existing config — they run unattended.
+
 - `settingsForm` holds an editable copy as strings, one `settingsField` per TOML
   key. `toConfig()` parses them onto a copy of the running config and returns the
   draft. Field-level input rules (empty required field, non-numeric count, empty
@@ -524,7 +535,7 @@ Run the TUI headless in tmux against generated testdata and inspect the actual r
 
 ```bash
 go run testdata/make_testdata.go
-go build -o /tmp/cb ./cmd/camera-backup
+go build -o /tmp/cb ./cmd/lumen
 tmux new-session -d -s tui -x 120 -y 40 '/tmp/cb --config testdata/config.toml tui'
 tmux send-keys -t tui j        # navigate/interact (one key per call, small sleep between)
 tmux capture-pane -t tui -p    # inspect the rendered screen (-e keeps colors/focus)
