@@ -1458,8 +1458,10 @@ func (m *Model) buildTabs() {
 	r := m.status
 
 	// With no source device the SSD tree is browsable instead — but not in
-	// direct mode, where the SSD is not part of the picture at all.
-	if r.SourceAvail || (r.SSDAvail() && m.cfg.SSDInUse()) {
+	// direct mode, where the SSD is not part of the picture at all, and only
+	// when an SSD root actually exists as a directory: an unmounted SSD scans
+	// as empty, and an "All (0)" tab would present that as a scanned device.
+	if r.SourceAvail || (r.SSDSourceReadable() && m.cfg.SSDInUse()) {
 		count := len(r.CameraFiles)
 		if !r.SourceAvail {
 			count = len(r.SSDFiles)
@@ -1760,10 +1762,14 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 		return m, m.launchBatch(modePhase1, tasks, true, 0, m.cfg.SSDWorkerCount(),
 			func(f int) tea.Msg { return phase1DoneMsg{failures: f} })
 
-	case !r.SourceAvail && r.SSDAvail() && r.NASAvail() && m.cfg.SSDInUse():
+	case !r.SourceAvail && r.SSDSourceReadable() && r.NASAvail() && m.cfg.SSDInUse():
 		// Sync SSD→NAS only. Never in direct mode: the SSD is hidden from the
 		// UI there, so copying from it behind the user's back would be a
 		// surprise — `camera-backup sync` is the explicit way to ask for it.
+		// The SSD is the *source* here, so its roots must exist as
+		// directories (SSDSourceReadable, not SSDAvail): an unmounted SSD
+		// scans as empty, and this branch would answer "NAS is already up to
+		// date" for a comparison that never ran.
 		missing := m.selectedIn(r.MissingOnNAS)
 		if len(m.selected) > 0 && len(missing) == 0 {
 			m.statusMsg = "No selected files need syncing to NAS."
@@ -1792,6 +1798,8 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 			m.statusMsg = "Direct mode: no source device mounted — insert a card or connect a drive."
 		case r.SourceAvail && !r.SSDAvail():
 			m.statusMsg = "Camera found but no SSD root is mounted — cannot copy."
+		case !r.SourceAvail && m.cfg.SSDInUse() && !r.SSDSourceReadable():
+			m.statusMsg = "No camera, and the SSD is not mounted — nothing to read from."
 		case !r.SourceAvail && r.SSDAvail() && !r.NASAvail():
 			m.statusMsg = "No camera, and NAS is not available — nothing to sync."
 		default:
@@ -1816,7 +1824,10 @@ func (m *Model) startPhase2() (tea.Model, tea.Cmd) {
 
 // startVerify launches the verify pass with live per-file progress.
 func (m *Model) startVerify() (tea.Model, tea.Cmd) {
-	if m.status == nil || (!m.status.SourceAvail && !m.status.SSDAvail()) {
+	// The fallback authority is the SSD read as a source, so the bar is
+	// SSDSourceReadable — verify itself refuses an unmounted SSD as authority
+	// for the same reason.
+	if m.status == nil || (!m.status.SourceAvail && !m.status.SSDSourceReadable()) {
 		m.statusMsg = "Nothing to verify — no camera or SSD available."
 		return m, nil
 	}

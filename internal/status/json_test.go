@@ -3,6 +3,7 @@ package status_test
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -154,6 +155,28 @@ func TestReport_NoSourceComparesSSD(t *testing.T) {
 	}
 	if rep.Counts.MissingOnNAS == nil || *rep.Counts.MissingOnNAS != 1 {
 		t.Errorf("missing_on_nas = %v, want 1", rep.Counts.MissingOnNAS)
+	}
+}
+
+// An unmounted SSD whose mount-point parent still exists must not be reported
+// as compared: a waybar panel reading missing_on_nas would show "0 → NAS" for
+// a comparison that never ran. compared says "none" and the counts stay null.
+func TestReport_UnmountedSSDComparesNothing(t *testing.T) {
+	f := newFixture(t)
+	f.cfg.Source = filepath.Join(f.dir, "not-mounted")
+	for _, p := range []string{f.cfg.SSDPhotos, f.cfg.SSDVideos} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rep := f.report()
+
+	if rep.Compared != status.ComparedNone {
+		t.Errorf("compared = %q, want %q — no SSD root exists to read", rep.Compared, status.ComparedNone)
+	}
+	if rep.Counts.MissingOnNAS != nil {
+		t.Errorf("missing_on_nas = %v, want null for a comparison that never ran", *rep.Counts.MissingOnNAS)
 	}
 }
 

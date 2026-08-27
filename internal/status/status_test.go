@@ -220,6 +220,35 @@ func TestCompute_NoCameraComparesSSDToNAS(t *testing.T) {
 	assertNames(t, "MissingOnNAS", r.MissingOnNAS, "DSC_0002.JPG")
 }
 
+// The no-camera fallback reads the SSD as a source, and a source must exist
+// as a directory. An unmounted SSD whose mount-point parent still exists
+// passes the destination rule (RootAvailable) but scans as empty — and
+// "nothing missing on the NAS" would then describe a comparison that never
+// ran, which is exactly what a person checks before formatting a card.
+func TestCompute_NoCameraUnmountedSSDComparesNothing(t *testing.T) {
+	f := newFixture(t)
+	f.cfg.Source = filepath.Join(f.dir, "not-mounted")
+	// The classic unmounted shape: the parent directory exists, the root does
+	// not — so RootAvailable still says yes.
+	for _, p := range []string{f.cfg.SSDPhotos, f.cfg.SSDVideos} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := f.compute()
+
+	if !r.SSDAvail() {
+		t.Fatal("SSDAvail() = false — the test wants the parent-exists case, where the destination rule still passes")
+	}
+	if r.SSDSourceReadable() {
+		t.Error("SSDSourceReadable() = true for roots that do not exist")
+	}
+	if r.MissingOnNAS != nil {
+		t.Errorf("MissingOnNAS = %v, want nil — nothing was compared", names(r.MissingOnNAS))
+	}
+}
+
 // In direct mode the SSD is not a copy source either, so an absent card leaves
 // nothing to compare.
 func TestCompute_NoCameraInDirectMode(t *testing.T) {

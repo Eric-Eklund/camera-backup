@@ -175,6 +175,29 @@ func TestVerify_StagedModeWithoutASourceUsesTheSSD(t *testing.T) {
 	}
 }
 
+// An unmounted SSD is no authority. Its root passes the destination rule
+// (the parent directory exists) but scans as empty — and the pass then ended
+// on "All 0 files verified OK" for a tree nothing ever read, which is the
+// exact line the empty-file_extensions fix exists to prevent. The fallback
+// authority must be a directory that actually exists.
+func TestVerify_UnmountedSSDIsNotAnAuthority(t *testing.T) {
+	cfg, cam, ssd, _ := directSetup(t)
+	cfg.DirectToNAS = false
+	for _, p := range []string{cam, ssd} {
+		if err := os.RemoveAll(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := verify.RunWithCallback(cfg, log.New(io.Discard, "", 0), nil)
+	if err == nil {
+		t.Fatal("verify accepted an SSD that does not exist as its authority")
+	}
+	if !strings.Contains(err.Error(), "no verification authority") {
+		t.Errorf("error = %v, want it to say there is no authority", err)
+	}
+}
+
 // Outcome.Clean is what the CLI and the TUI branch on, so its meaning is
 // pinned here rather than left to each caller to re-derive.
 func TestOutcome_CleanOnlyWhenNothingWentUnlookedAt(t *testing.T) {

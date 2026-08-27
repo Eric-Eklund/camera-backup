@@ -133,7 +133,7 @@ func NewReport(cfg *config.Config, r *StatusResult, now time.Time) Report {
 		}
 		rep.Counts.MissingOnNAS = intPtr(len(r.MissingOnNAS))
 		rep.Bytes.ToNAS = int64Ptr(totalSize(r.MissingOnNAS))
-	case r.SSDAvail() && cfg.SSDInUse():
+	case r.SSDSourceReadable() && cfg.SSDInUse():
 		rep.Compared = ComparedSSD
 		rep.Counts.MissingOnNAS = intPtr(len(r.MissingOnNAS))
 		rep.Bytes.ToNAS = int64Ptr(totalSize(r.MissingOnNAS))

@@ -25,6 +25,15 @@ type StatusResult struct {
 	SSDVideosAvail bool
 	NASPhotosAvail bool
 	NASVideosAvail bool
+
+	// SSDPhotosReadable/SSDVideosReadable report whether each SSD root exists
+	// as a directory — the bar for reading the SSD as a *source*, which is
+	// what the no-camera comparison does. The Avail fields above use
+	// RootAvailable's parent-counts rule, which is a destination rule (the
+	// root is created on first copy): an unmounted SSD passes it and scans as
+	// empty, and "0 missing" would then describe a comparison that never ran.
+	SSDPhotosReadable bool
+	SSDVideosReadable bool
 	SSDPhotosFree  int64
 	SSDVideosFree  int64
 	NASPhotosFree  int64
@@ -57,6 +66,14 @@ type StatusResult struct {
 
 // SSDAvail reports whether at least one SSD root is mounted.
 func (r *StatusResult) SSDAvail() bool { return r.SSDPhotosAvail || r.SSDVideosAvail }
+
+// SSDSourceReadable reports whether the SSD can stand in as the comparison
+// source: at least one root actually exists as a directory. This is what the
+// no-camera branch of Compute — and everything presenting its result — must
+// ask, not SSDAvail: parent-counts is for destinations.
+func (r *StatusResult) SSDSourceReadable() bool {
+	return r.SSDPhotosReadable || r.SSDVideosReadable
+}
 
 // NASAvail reports whether at least one NAS root is mounted.
 func (r *StatusResult) NASAvail() bool { return r.NASPhotosAvail || r.NASVideosAvail }
@@ -95,6 +112,9 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 		SSDVideosAvail: config.RootAvailable(cfg.SSDVideos),
 		NASPhotosAvail: config.RootAvailable(cfg.NASPhotos),
 		NASVideosAvail: config.RootAvailable(cfg.NASVideos),
+
+		SSDPhotosReadable: isDir(cfg.SSDPhotos),
+		SSDVideosReadable: isDir(cfg.SSDVideos),
 	}
 	r.SourceFree = freeOrNeg(source, r.SourceAvail)
 	r.SSDPhotosFree = freeOrNeg(cfg.SSDPhotos, r.SSDPhotosAvail)
@@ -153,9 +173,12 @@ func Compute(cfg *config.Config, logger *log.Logger) (*StatusResult, error) {
 		r.MissingOnNAS = append(
 			scan.MissingFromDest(camPhotos, nasPhotoIdx),
 			scan.MissingFromDest(camVideos, nasVideoIdx)...)
-	} else if r.SSDAvail() && cfg.SSDInUse() {
+	} else if r.SSDSourceReadable() && cfg.SSDInUse() {
 		// No camera: compute what SSD files are missing on NAS, per category.
-		// Skipped in direct mode — there the SSD is not a copy source.
+		// Skipped in direct mode — there the SSD is not a copy source — and
+		// when no SSD root exists as a directory: an unmounted SSD scans as
+		// empty, and "nothing missing on the NAS" would describe a comparison
+		// that never happened.
 		ssdPhotos, ssdVideos := scan.SplitByCategory(r.SSDFiles, categoryFn)
 		r.MissingOnNAS = append(
 			scan.MissingByRelPath(ssdPhotos, nasPhotoIdx),

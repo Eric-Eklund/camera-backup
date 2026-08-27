@@ -139,7 +139,14 @@ func verifyAll(cfg *config.Config, logger *log.Logger, progressOut io.Writer, fn
 	nasPhotosAvail := config.RootAvailable(cfg.NASPhotos)
 	nasVideosAvail := config.RootAvailable(cfg.NASVideos)
 
-	if !sourceAvail && !ssdPhotosAvail && !ssdVideosAvail {
+	// As the fallback *authority* the SSD must exist as a directory — the
+	// parent-counts rule above is for destinations, where the root is created
+	// on first copy. An unmounted SSD passes that rule and scans as empty,
+	// and the pass would end on "All 0 files verified OK" for a tree nothing
+	// ever read.
+	ssdPhotosReadable := ssdInUse && isDir(cfg.SSDPhotos)
+	ssdVideosReadable := ssdInUse && isDir(cfg.SSDVideos)
+	if !sourceAvail && !ssdPhotosReadable && !ssdVideosReadable {
 		if ssdInUse {
 			return outcome, fmt.Errorf("no verification authority available — mount the source device (%s) or an SSD root", source)
 		}
