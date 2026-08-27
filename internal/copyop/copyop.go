@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/checksum"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/ui"
+	"github.com/Eric-Eklund/lumen/internal/checksum"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/ui"
 )
 
 const copyBufSize = 4 << 20 // 4 MB

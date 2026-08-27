@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/copyop"
-	"github.com/Eric-Eklund/camera-backup/internal/progress"
+	"github.com/Eric-Eklund/lumen/internal/copyop"
+	"github.com/Eric-Eklund/lumen/internal/progress"
 )
 
 func read(t *testing.T, path string) progress.State {

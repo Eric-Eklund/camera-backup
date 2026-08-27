@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Eric-Eklund/camera-backup/internal/checksum"
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/ui"
+	"github.com/Eric-Eklund/lumen/internal/checksum"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/ui"
 )
 
 // FileResult is the result for a single verified file.

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/status"
 )
 
 // unmountedSSDModel is the state after a scan with no camera and an SSD whose

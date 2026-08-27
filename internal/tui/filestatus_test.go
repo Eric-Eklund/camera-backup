@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
-	"github.com/Eric-Eklund/camera-backup/internal/verify"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/verify"
 )
 
 // modelWith builds a model in the state statusReadyMsg leaves it in, so the

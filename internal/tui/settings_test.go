@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/config"
 )
 
 func baseCfg() *config.Config {

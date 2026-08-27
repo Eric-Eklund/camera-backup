@@ -9,10 +9,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/devices"
-	"github.com/Eric-Eklund/camera-backup/internal/preview"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/devices"
+	"github.com/Eric-Eklund/lumen/internal/preview"
+	"github.com/Eric-Eklund/lumen/internal/scan"
 )
 
 // panel renders content inside a rounded border with the title embedded in
@@ -771,6 +771,10 @@ func (m *Model) renderSettings() string {
 
 	var sb strings.Builder
 	sb.WriteString("\n")
+	if m.firstRun {
+		sb.WriteString("  " + styleWarn.Render("First run — no config.toml yet.") + "\n")
+		sb.WriteString("  " + styleDim.Render("Set the paths ([d] picks a source from the mounted devices), then [s] creates "+f.configPath) + "\n\n")
+	}
 	for i, fl := range f.fields {
 		focused := i == f.cursor
 		editing := focused && f.editing
@@ -835,10 +839,16 @@ func (m *Model) renderSettings() string {
 	}
 
 	title := "Settings"
+	if m.firstRun {
+		title = "Lumen — first run"
+	}
 	if f.dirty {
-		title = "Settings •"
+		title += " •"
 	}
 	hint := "[j/k] move  [enter] edit/toggle  [d] devices  [s] save  [r] reload  [esc] back"
+	if m.firstRun {
+		hint = "[j/k] move  [enter] edit/toggle  [d] devices  [s] save & continue  [q] quit without saving"
+	}
 	if f.editing {
 		hint = "[enter] accept  [esc] cancel  [ctrl+u] clear  [←→] move  typing edits the value"
 	}
@@ -1142,7 +1152,7 @@ func (m *Model) renderDone() string {
 
 	sb.WriteString("\n  " + styleOK.Render("[r]") + " Rescan and return to main screen\n")
 	sb.WriteString("  " + styleDim.Render("[q]") + " Quit\n")
-	return m.screenFrame("camera-backup", sb.String(), "[r] rescan  [e] errors  [q] quit")
+	return m.screenFrame("Lumen", sb.String(), "[r] rescan  [e] errors  [q] quit")
 }
 
 // renderErrors renders the error summary screen (copy failures and verify issues).

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/scan"
 )
 
 // ── Walk ─────────────────────────────────────────────────────────────────────

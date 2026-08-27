@@ -24,14 +24,14 @@ func requireExiftool(t *testing.T) {
 	}
 }
 
-// rawSample returns the path of a RAW sample from CAMERA_BACKUP_RAW_SAMPLES,
+// rawSample returns the path of a RAW sample from LUMEN_RAW_SAMPLES,
 // a directory of real camera files kept outside the repo (they are megabytes
 // each). Skips when it is not set.
 func rawSample(t *testing.T, name string) string {
 	t.Helper()
-	dir := os.Getenv("CAMERA_BACKUP_RAW_SAMPLES")
+	dir := os.Getenv("LUMEN_RAW_SAMPLES")
 	if dir == "" {
-		t.Skip("set CAMERA_BACKUP_RAW_SAMPLES to a directory of RAW samples")
+		t.Skip("set LUMEN_RAW_SAMPLES to a directory of RAW samples")
 	}
 	p := filepath.Join(dir, name)
 	if _, err := os.Stat(p); err != nil {

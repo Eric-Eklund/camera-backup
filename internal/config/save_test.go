@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/config"
 )
 
 func loadSaveReload(t *testing.T, path string, mutate func(*config.Config)) (before, after *config.Config, text string) {
@@ -239,10 +239,10 @@ func TestSave_TemplateRoundTrip(t *testing.T) {
 		t.Errorf("file_extensions changed: %v → %v", before.FileExtensions, after.FileExtensions)
 	}
 	// The template's explanatory prose must still be there.
-	if !strings.Contains(text, "# camera-backup configuration template.") {
+	if !strings.Contains(text, "# Lumen configuration template.") {
 		t.Errorf("template header was lost:\n%s", text)
 	}
-	if strings.Contains(text, "Added by camera-backup") {
+	if strings.Contains(text, "Added by lumen") {
 		t.Errorf("template should already contain every managed key:\n%s", text)
 	}
 }

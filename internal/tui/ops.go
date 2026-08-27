@@ -12,12 +12,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/copyop"
-	"github.com/Eric-Eklund/camera-backup/internal/preview"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
-	"github.com/Eric-Eklund/camera-backup/internal/verify"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/copyop"
+	"github.com/Eric-Eklund/lumen/internal/preview"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/verify"
 )
 
 func statusScanCmd(cfg *config.Config, logger *log.Logger) tea.Cmd {

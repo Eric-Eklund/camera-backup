@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/config"
 )
 
 func TestCategory_Photos(t *testing.T) {
@@ -166,6 +166,19 @@ ssd_videos = "/ssd/Videos"
 				t.Errorf("error = %v, want it to name file_extensions", err)
 			}
 		})
+	}
+}
+
+// The first-run draft seeds the extension lists but leaves every path empty —
+// it exists to be edited, so it must NOT pass Validate as it stands: a valid
+// empty draft could be saved untouched and configure nothing.
+func TestFirstRunDefaults_SeedsExtensionsButDoesNotValidate(t *testing.T) {
+	cfg := config.FirstRunDefaults()
+	if len(cfg.FileExtensions) == 0 || len(cfg.VideoExtensions) == 0 {
+		t.Error("the first-run draft should seed both extension lists")
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate accepted the untouched first-run draft — it could be saved with no paths at all")
 	}
 }
 

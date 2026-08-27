@@ -10,9 +10,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/devices"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/devices"
+	"github.com/Eric-Eklund/lumen/internal/status"
 )
 
 func testLogger() *log.Logger { return log.New(io.Discard, "", 0) }

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/status"
 )
 
 // A scan that could not read part of the card describes less than the whole

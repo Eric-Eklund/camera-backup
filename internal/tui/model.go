@@ -13,12 +13,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/copyop"
-	"github.com/Eric-Eklund/camera-backup/internal/preview"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/status"
-	"github.com/Eric-Eklund/camera-backup/internal/verify"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/copyop"
+	"github.com/Eric-Eklund/lumen/internal/preview"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/status"
+	"github.com/Eric-Eklund/lumen/internal/verify"
 )
 
 type Screen int
@@ -69,6 +69,10 @@ type Model struct {
 	// configPath is where the settings screen writes; empty disables editing.
 	configPath string
 	settings   *settingsForm
+	// firstRun marks a start without a config.toml: the TUI opens on the
+	// settings screen, the first successful save creates the file, and until
+	// then there is no main screen to fall back to — esc/q quit instead.
+	firstRun bool
 	// picker is the device screen's state; nil when it is not open.
 	picker *devicePicker
 	// watcherStop stops the running device watcher. Closed and replaced when
@@ -184,6 +188,20 @@ func New(cfg *config.Config, logger *log.Logger, configPath string) *Model {
 		fileProgress: map[string]copyop.FileProgress{},
 		fileStart:    map[string]time.Time{},
 	}
+}
+
+// NewFirstRun builds the TUI for a machine with no config.toml yet. It opens
+// on the settings screen with cfg (normally config.FirstRunDefaults) as the
+// draft; the first successful save creates configPath and continues into the
+// normal flow, exactly as a start with that config would have. Quitting
+// before saving writes nothing.
+func NewFirstRun(cfg *config.Config, logger *log.Logger, configPath string) *Model {
+	m := New(cfg, logger, configPath)
+	m.firstRun = true
+	m.screen = screenSettings
+	m.settings = newSettingsForm(cfg, configPath)
+	m.statusMsg = ""
+	return m
 }
 
 // SetProgram wires the tea.Program back into the model so ops.go can call p.Send().
@@ -778,6 +796,12 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			f.notice = ""
 			return m, nil
 		}
+		if m.firstRun {
+			// No config.toml exists yet, so there is no main screen to fall
+			// back to — leaving the form is leaving the program, and nothing
+			// has been written.
+			return m, tea.Quit
+		}
 		m.screen = screenMain
 		m.settings = nil
 	}
@@ -819,6 +843,14 @@ func (m *Model) saveSettings() tea.Cmd {
 	// make meaningless — start clean.
 	m.selected = map[string]bool{}
 	m.statusMsg = "Rescanning after config change…"
+	if m.firstRun {
+		// config.toml now exists: leave first-run mode and continue into the
+		// normal flow, exactly as a start with this config would have.
+		m.firstRun = false
+		m.settings = nil
+		m.screen = screenLoading
+		m.statusMsg = "Scanning devices…"
+	}
 	return tea.Batch(m.restartWatcher(), statusScanCmd(m.cfg, m.logger))
 }
 
@@ -1765,7 +1797,7 @@ func (m *Model) startCopy() (tea.Model, tea.Cmd) {
 	case !r.SourceAvail && r.SSDSourceReadable() && r.NASAvail() && m.cfg.SSDInUse():
 		// Sync SSD→NAS only. Never in direct mode: the SSD is hidden from the
 		// UI there, so copying from it behind the user's back would be a
-		// surprise — `camera-backup sync` is the explicit way to ask for it.
+		// surprise — `lumen sync` is the explicit way to ask for it.
 		// The SSD is the *source* here, so its roots must exist as
 		// directories (SSDSourceReadable, not SSDAvail): an unmounted SSD
 		// scans as empty, and this branch would answer "NAS is already up to
@@ -2018,9 +2050,9 @@ func truncate(s string, w int) string {
 // renderLoading renders the loading screen.
 func (m *Model) renderLoading() string {
 	body := lipgloss.Place(m.width-2, m.height-3, lipgloss.Center, lipgloss.Center,
-		styleTitle.Render("camera-backup")+"\n\n"+m.statusMsg,
+		styleTitle.Render("Lumen")+"\n\n"+m.statusMsg,
 	)
-	return m.screenFrame("camera-backup", body, "[q] quit")
+	return m.screenFrame("Lumen", body, "[q] quit")
 }
 
 // renderConfirm renders the Phase 1 done / confirm Phase 2 screen.

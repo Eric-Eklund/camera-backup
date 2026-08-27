@@ -1,4 +1,4 @@
-module github.com/Eric-Eklund/camera-backup
+module github.com/Eric-Eklund/lumen
 
 go 1.26.1
 

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Eric-Eklund/camera-backup/internal/checksum"
+	"github.com/Eric-Eklund/lumen/internal/checksum"
 )
 
 func TestFile_ReturnsSHA256Hex(t *testing.T) {

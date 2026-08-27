@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Eric-Eklund/camera-backup/internal/config"
-	"github.com/Eric-Eklund/camera-backup/internal/scan"
-	"github.com/Eric-Eklund/camera-backup/internal/ui"
+	"github.com/Eric-Eklund/lumen/internal/config"
+	"github.com/Eric-Eklund/lumen/internal/scan"
+	"github.com/Eric-Eklund/lumen/internal/ui"
 )
 
 // StatusResult holds everything the TUI and CLI need from a status scan.
@@ -34,10 +34,10 @@ type StatusResult struct {
 	// empty, and "0 missing" would then describe a comparison that never ran.
 	SSDPhotosReadable bool
 	SSDVideosReadable bool
-	SSDPhotosFree  int64
-	SSDVideosFree  int64
-	NASPhotosFree  int64
-	NASVideosFree  int64
+	SSDPhotosFree     int64
+	SSDVideosFree     int64
+	NASPhotosFree     int64
+	NASVideosFree     int64
 
 	CameraFiles []scan.FileInfo
 	SSDFiles    []scan.FileInfo // combined photos+videos roots (single scan when merged)
