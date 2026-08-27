@@ -1,4 +1,6 @@
-# Lumen
+<p align="center">
+  <img src="assets/lumen-logo.png" alt="Lumen" width="460">
+</p>
 
 A CLI tool for safely backing up camera media (Nikon Z6 III and similar) from memory cards to a local SSD and a remote NAS — incrementally and with SHA256 verification. Cards and external drives can also be dumped straight to the NAS, skipping the local SSD.
 

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1252 832" width="1252" height="832">
+  <!-- Lumen logotype: the iris mark with the wordmark.
+       Vector recreation of the original artwork. -->
+  <defs>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F9C93E"/>
+      <stop offset="0.45" stop-color="#F49A2C"/>
+      <stop offset="1" stop-color="#ED6B22"/>
+    </linearGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F6AC3B"/>
+      <stop offset="1" stop-color="#EF7A20"/>
+    </linearGradient>
+    <clipPath id="ringclip">
+      <path fill-rule="evenodd" d="M389.5 216.4 L634.5 216.4 L807.6 389.5 L807.6 634.5 L634.5 807.6 L389.5 807.6 L216.4 634.5 L216.4 389.5 Z M512 332 L356.1 422 L356.1 602 L512 692 L667.9 602 L667.9 422 Z"/>
+    </clipPath>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1252" height="832" fill="#212428"/>
+  <g transform="translate(315,416) scale(0.66) translate(-512,-512)">
+    <g filter="url(#shadow)">
+      <path fill="url(#ring)" stroke="url(#ring)" stroke-width="26" stroke-linejoin="round" fill-rule="evenodd"
+        d="M389.5 216.4 L634.5 216.4 L807.6 389.5 L807.6 634.5 L634.5 807.6 L389.5 807.6 L216.4 634.5 L216.4 389.5 Z M512 332 L356.1 422 L356.1 602 L512 692 L667.9 602 L667.9 422 Z"/>
+      <g clip-path="url(#ringclip)">
+        <polygon points="216.4,389.5 389.5,216.4 512,512" fill="#FFFFFF" opacity="0.10"/>
+        <polygon points="389.5,216.4 634.5,216.4 512,512" fill="#FFFFFF" opacity="0.05"/>
+        <polygon points="807.6,389.5 807.6,634.5 512,512" fill="#000000" opacity="0.04"/>
+        <polygon points="389.5,807.6 634.5,807.6 512,512" fill="#000000" opacity="0.07"/>
+        <polygon points="216.4,634.5 389.5,807.6 512,512" fill="#000000" opacity="0.04"/>
+      </g>
+    </g>
+  </g>
+  <text x="558" y="474" font-family="Liberation Sans, Arial, Helvetica, sans-serif" font-weight="bold"
+        font-size="164" letter-spacing="8" fill="url(#word)" stroke="url(#word)" stroke-width="7"
+        paint-order="stroke" stroke-linejoin="round">LUMEN</text>
+</svg>
