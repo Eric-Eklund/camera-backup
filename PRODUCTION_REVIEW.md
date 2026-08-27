@@ -307,3 +307,16 @@ till 100 %, liksom hela UI-lagret. Det enda nya fyndet med produktionsrelevans
 är **N1** — rapporteringssidans kvarvarande variant av H2 — som bör åtgärdas
 med samma lilla `isDir`-regel. N2–N4 är medvetna avvägningar att lämna eller
 städa vid tillfälle.
+
+> **Status:** N1 är åtgärdat på denna branch, i alla tre skepnader. Under
+> granskningen visade sig N1 även ha en **verify-variant**, den allvarligaste:
+> utan kamera accepterade `verify` en omonterad SSD som auktoritet och svarade
+> "All 0 files verified OK", exit 0. `StatusResult` skiljer nu på SSD:n som
+> destination (`RootAvailable`, oförändrat) och som källa
+> (`SSDPhotosReadable`/`SSDVideosReadable`, `isDir`): `status.Compute` och
+> `NewReport` hoppar över jämförelsen (`compared: "none"`, räknare null),
+> TUI:n visar "No camera, and the SSD is not mounted" i stället för "NAS is
+> already up to date" och döljer All-fliken, och `verify` vägrar auktoriteten
+> med fel och exit 1. Tester i status-, json-, verify- och tui-paketen pinnar
+> beteendet; allt verifierat end-to-end mot binären, inklusive att normal
+> drift är oförändrad.
